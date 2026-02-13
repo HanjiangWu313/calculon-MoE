@@ -228,6 +228,7 @@ class Layer:
   # weight grads to accommodate for possible weight_grad sharding
   # among data parallel nodes
   def get_optim_step_flops(self):
+    #  Needs to figure out why the factor is 11 here
     optim_flops = self.weight_grads / self.optim_sharding_num_proc * 11
     return optim_flops
 
@@ -252,6 +253,7 @@ class Layer:
 
   def get_weight_grad(self, sharded=True):
     # Keep lower precision copy of grads for mem and net transfers
+    #  The master copy that is kept in the Optimizer
     grads = self.weight_grads
     if sharded:
       # We keep grads in lower precision for communication
@@ -283,7 +285,7 @@ class Layer:
 
   def use_matrix_engine(self):
     return False
-
+  
   def get_comm_bytes(self, stage, baseblock=True):
     return 0
 
@@ -353,6 +355,7 @@ class Linear(Layer):
                      weight_space=n*k,
                      weight_grads=n*k,
                      activation_space=m*n,
+                     #  Activation gradients are the backward passed values
                      activation_grads=m*k,
                      optim_space=2*n*k,
                      needs_recompute=needs_recompute,
@@ -362,6 +365,35 @@ class Linear(Layer):
 
   def use_matrix_engine(self):
     return True
+
+# This is the Linear layer used for MoE
+class Linear_MoE(Layer):
+  def __init__(self, name, sys, exp_per_par, batch_seq, c_in, c_out,
+               needs_recompute=False, activation_reused=False,
+               activation_stored=True, output_stored=True):
+    m, n, k = batch_seq, c_in, c_out
+    mult = exp_per_par
+    super().__init__(name,
+                     sys,
+                     fw_flops=mult*2*m*n*k,
+                     agrad_flops=mult*2*m*n*k,
+                     wgrad_flops=mult*2*m*n*k,
+                     inputs_size=mult*m*n,
+                     output_size=mult*m*k,
+                     weight_space=mult*n*k,
+                     weight_grads=mult*n*k,
+                     activation_space=mult*m*n,
+                     #  Activation gradients are the backward passed values
+                     activation_grads=mult*m*k,
+                     optim_space=2*mult*n*k,
+                     needs_recompute=needs_recompute,
+                     activation_reused=activation_reused,
+                     activation_stored=activation_stored,
+                     output_stored=output_stored)
+
+  def use_matrix_engine(self):
+    return True
+
 
 class LinearOverlapped(Layer):
   def __init__(self, name, sys, batch_seq, c_in, c_out, tensor_par_comm_type,
@@ -385,6 +417,8 @@ class LinearOverlapped(Layer):
         assert k % self.num_peers == 0
         # assert m % self.num_peers == 0         # this should be true for seq_par
         k = k // self.num_peers
+        #  In here, it needs to partition the input matrix into num tiles 
+        # with the num tiles as the tp dimension
         act_space = m * n // num_tiles
         act_grad_space = m * k
         act_net_buffer = m * n // num_tiles
@@ -401,7 +435,7 @@ class LinearOverlapped(Layer):
         #act_net_buffer = m * k // num_tiles
     else:
       if not conjugate:
-        # AllReduce case
+        # Identity case
         assert k % self.num_peers == 0
         k = k // self.num_peers
         act_space = m * n
@@ -409,7 +443,7 @@ class LinearOverlapped(Layer):
         act_net_buffer = m * n // num_tiles
         act_grad_net_buffer = 0
       else:
-        # Identityy case
+        # All-Reduce case
         assert n % self.num_peers == 0
         n = n // self.num_peers
         act_space = 0
@@ -548,6 +582,7 @@ class LinearOverlapped(Layer):
 
   def compute_processing_time(self, stage):
     flop_time = self.compute_flops_time(stage)
+    # The network usage of the processor
     flop_time_slowed = flop_time / (1 - self.net.processor_usage)
     mem_time = self.compute_mem_time(stage)
     net_time = self.compute_net_time(stage)
@@ -588,6 +623,124 @@ class LinearOverlapped(Layer):
         time += net_tile
     self.processing_time = time
     self.net_exposed_time = net_exposed_time
+    self._processed_flag = True
+    return self.processing_time
+
+  def get_exposed_net_time(self, stage, baseblock=True):
+    # only use after calling compute_processing_time(), otherwise it's set with None
+    assert self._processed_flag
+    return self.net_exposed_time
+
+  def get_required_bandwidth(self, stage, baseblock=True):
+    assert self._processed_flag
+    net_tile_size = self.get_comm_tile(stage, baseblock)
+    flop_time = self.compute_flops_time(stage)
+    flop_time_slowed = flop_time / (1 - self.net.processor_usage)
+    flop_tile_slowed = flop_time_slowed / self.num_tiles
+    return net_tile_size / flop_tile_slowed
+  
+class LinearOverlapped_All2All(Layer):
+  def __init__(self, name, sys, batch_seq, c_in, c_out,
+               num_tiles, net_id, num_peers, overlap='hide',
+               needs_recompute=False, needs_recomm=False,
+               activation_reused=False, activation_stored=True,
+               output_stored=True):
+    m, n, k = batch_seq, c_in, c_out
+    # num_tiles is the EP number
+    self.num_tiles = num_tiles
+    print(f"netid: {net_id}")
+    self.net = sys.get_network(net_id)
+    # num_peers is the EP number
+    self.num_peers = num_peers
+    self.overlap = overlap
+    self._processed_flag = False
+    # ReduceScatter case
+    # assert n % self.num_peers == 0
+    # assert m % self.num_peers == 0         # this should be true for seq_par
+    n = n
+    act_space = m * n
+    act_grad_space = m * k
+
+    super().__init__(name,
+                     sys,
+                     fw_flops=2*m*n*k,
+                     agrad_flops=2*m*n*k,
+                     wgrad_flops=2*m*n*k,
+                     inputs_size=m*n,
+                     output_size=m*k,
+                     weight_space=n*k,
+                     weight_grads=n*k,
+                     activation_space=act_space, # + act_net_buffer,
+                     activation_grads=act_grad_space,
+                     optim_space=2*n*k,
+                     needs_recompute=needs_recompute,
+                     needs_recomm=needs_recomm,
+                     activation_reused=activation_reused,
+                     activation_stored=activation_stored,
+                     output_stored=output_stored)
+
+  def use_matrix_engine(self):
+    return True
+
+  def get_comm_bytes(self, stage, baseblock=True):
+    if self.num_peers == 1:
+      return 0
+    all2all_bw_comm_size = self.inputs_size * self.bytes_per_element
+    all2all_fw_comm_size = self.output_size * self.bytes_per_element
+    if stage == 'fw':
+      return all2all_fw_comm_size
+    if stage == 'agrad':
+      return all2all_bw_comm_size
+    if stage == 'wgrad':
+      if self.needs_recomm:
+        return self.get_comm_bytes('fw', baseblock)
+      else:
+        return 0
+    if stage == 'optim':
+      return 0
+
+  def get_comm_flops(self, stage, baseblock=True):
+    return self.get_comm_bytes(stage, baseblock) / self.bytes_per_element
+
+  def get_num_tiles(self):
+    return self.num_tiles
+
+  def get_comm_tile(self, stage, baseblock=True):
+    return self.get_comm_bytes(stage, baseblock) / self.get_num_tiles()
+
+  def compute_net_time(self, stage, baseblock=True):
+    if stage == "fw":
+      return (self.num_peers-1) * self.net.time('all_to_all',
+        self.get_comm_bytes(stage, baseblock) / self.num_peers, 2)
+      # bw_net_time = (self.num_peers-1) * self.net.time('all_to_all',
+      #   comm_chunk_size, 2)
+      # return self.net.time(
+      #       "all_to_all", self.get_comm_bytes(stage, baseblock), self.num_peers)
+    elif stage == "agrad":
+      return (self.num_peers-1) * self.net.time('all_to_all',
+        self.get_comm_bytes(stage, baseblock) / self.num_peers, 2)
+      # return self.net.time(
+      #       "all_to_all", self.get_comm_bytes(stage, baseblock), self.num_peers)
+    else:
+      return 0
+
+  def compute_processing_time(self, stage):
+    flop_time = self.compute_flops_time(stage)
+    # The network usage of the processor
+    flop_time_slowed = flop_time / (1 - self.net.processor_usage)
+    mem_time = self.compute_mem_time(stage)
+    net_time = self.compute_net_time(stage)
+    net_time_per_tile = net_time / self.num_tiles
+    compute_time = self.sys.get_processing_time(flop_time, mem_time)
+
+    compute_time_per_tile = flop_time / self.num_tiles
+    print(f"net time: {net_time}, compute time: {compute_time_per_tile}")
+    time = compute_time_per_tile + (self.num_tiles-1) * max(net_time_per_tile, compute_time_per_tile)
+    if net_time == 0:
+      time = compute_time
+      net_exposed_time = 0
+    self.processing_time = time
+    self.net_exposed_time = 0
     self._processed_flag = True
     return self.processing_time
 
@@ -659,6 +812,7 @@ class DropOut(Layer):
                      agrad_flops=act_size,
                      inputs_size=act_size,
                      output_size=act_size,
+                     # A Mask is stored got Dropout  
                      activation_space=act_size,
                      activation_grads=act_size,
                      needs_recompute=needs_recompute,
@@ -713,6 +867,42 @@ class GeLU(Layer):
   def get_agrad_mem_accessed(self):
     return self.get_fw_mem_accessed()
 
+# SwiGLU: https://medium.com/@jiangmen28/beyond-relu-discovering-the-power-of-swiglu-%E8%B6%85%E8%B6%8A-relu-%E5%8F%91%E7%8E%B0-swiglu-%E7%9A%84%E5%8A%9B%E9%87%8F-9dbc7d8258bf
+# https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/api/c/activation.html
+# SwiGLU is swish (similar cost as GELU) + GLU (needs matrix element-wise processing)
+class SwiGLU(Layer):
+  def __init__(self, name, sys, mult, seq, hidden,
+               needs_recompute=False, activation_reused=False,
+               activation_stored=True, output_stored=True,
+               fused=False):
+    # Fused GeLU runs right after previous Linear layer and does not store
+    # activations or gradients
+    self._fused = fused
+    if fused:
+      eff_act_space = 0
+      eff_act_grads = 0
+    else:
+      eff_act_space = mult*seq*hidden*2
+      eff_act_grads = mult*seq*hidden*2
+
+    act_size=mult*seq*hidden
+    fw_flops_swish = 8*act_size
+    # m: 
+    fw_flops_matelemwise = mult*seq*hidden
+    bw_flops_swish = 13*act_size
+    bw_flops_matelemwise = 2*mult*seq*hidden
+    super().__init__(name, sys, fw_flops=fw_flops_swish + fw_flops_matelemwise,
+                     agrad_flops=bw_flops_swish + bw_flops_matelemwise,
+                     inputs_size=act_size, output_size=act_size,
+                     activation_space=eff_act_space,
+                     activation_grads=eff_act_grads,
+                     needs_recompute=needs_recompute,
+                     activation_reused=activation_reused,
+                     activation_stored=activation_stored,
+                     output_stored=output_stored)
+
+  def get_agrad_mem_accessed(self):
+    return self.get_fw_mem_accessed()
 
 # https://automata88.medium.com/how-to-implement-the-softmax-derivative-independently-from-any-loss-function-ae6d44363a9d
 class SoftMax(Layer):
@@ -805,6 +995,7 @@ class TPComm(Layer):
         # FW pass Identity/AllGather, BW pass AllReduce/ReduceScatter
         fw_flops = 0
         if not in_network_reduction:
+          # all the local portion of the act_size
           bw_flops = act_size * (self.num_peers - 1) / self.num_peers
         else:
           bw_flops = 0
@@ -934,6 +1125,233 @@ class TPComm(Layer):
 
   def get_exposed_net_time(self, stage, baseblock=True):
     # only use after calling compute_processing_time(), otherwise it's set witth None
+    return self.compute_net_time(stage, baseblock)
+
+  def compute_processing_time(self, stage):
+    return 0
+
+# This layer is used to help select the top k elements from the softmaxed list
+# The input to this should tokens * Num_experts and the output will hence be tokens
+# act_size here represents the inputs
+class SelTopK(Layer):
+  def __init__(self, name, sys, act_size, num_experts, k,
+               needs_recompute=False, activation_reused=False,
+               activation_stored=True, output_stored=True):
+    super().__init__(name,
+                     sys,
+                     # k times the input to operate with
+                     fw_flops=k*act_size,
+                     # k times the input to operate with
+                     agrad_flops=k*act_size,
+                     inputs_size=act_size,
+                     # This is adjusted because of act_size = tokens * num_experts -> tokens * k  
+                     output_size=act_size // num_experts * k,
+                     activation_space=act_size,
+                     activation_grads=act_size,
+                     needs_recompute=needs_recompute,
+                     activation_reused=activation_reused,
+                     activation_stored=activation_stored,
+                     output_stored=output_stored)
+  # No need to store the activation because it just stores operator on the already stored activation
+  def get_activation(self):
+    return 0
+  
+  def get_activation_grad(self):
+    return 0
+
+  def get_fw_mem_accessed(self):
+    mem_accessed = self.activation_space
+    mem_accessed *= self.bytes_per_element
+    return mem_accessed
+
+  def get_agrad_mem_accessed(self):
+    return self.get_fw_mem_accessed()
+
+# This Layer takes in the input
+class TensorTrans(Layer):
+  def __init__(self, name, sys, act_size, 
+               needs_recompute=False, activation_reused=False,
+               activation_stored=True, output_stored=True):
+    super().__init__(name,
+                     sys,
+                     fw_flops=act_size,
+                     agrad_flops=act_size,
+                     inputs_size=act_size,
+                     # This is adjusted because of act_size = tokens * num_experts -> tokens * k  
+                     output_size=act_size,
+                     activation_space=act_size,
+                     activation_grads=act_size,
+                     needs_recompute=needs_recompute,
+                     activation_reused=activation_reused,
+                     activation_stored=activation_stored,
+                     output_stored=output_stored)
+
+  def get_activation(self):
+    return 0
+  
+  def get_activation_grad(self):
+    return 0
+
+  def get_fw_mem_accessed(self):
+    mem_accessed = self.activation_space
+    mem_accessed *= self.bytes_per_element
+    return mem_accessed
+  # In the Backprop, it should just be transforming the data back
+  def get_agrad_mem_accessed(self):
+    return self.get_fw_mem_accessed()
+
+
+#  This is the Communication between the expert slice dimension
+class ESComm(Layer):
+  
+  def __init__(self, name, sys, act_size, net_id, num_peers, exp_par_comm_type,
+               in_network_reduction=False, needs_recomm=False, activation_reused=False,
+               activation_stored=True, output_stored=True):
+    self.comm_size = act_size
+    self.name = name
+    self.net = sys.get_network(net_id)
+    self.num_peers = num_peers
+    
+    self.exp_par_comm_type = exp_par_comm_type
+  def get_comm_bytes(self, stage, baseblock=True):
+    # Get the bytes to communicate within the loop
+    if stage == 'fw':
+      return self.comm_size * self.bytes_per_element
+  def compute_net_time(self, stage, baseblock=True):
+    
+    if stage == 'fw':
+      fw_net_time = self.net.time('all_gather',
+      self.get_comm_bytes(stage, baseblock), self.num_peers)
+      return fw_net_time
+    elif stage == 'agrad' or stage == 'wgrad':
+      _net_time = self.net.time('all_gather',
+      self.get_comm_bytes(stage, baseblock), self.num_peers)
+      return fw_net_time
+    # In bw, it should be all_gather as well, but needs to check it
+    # out with the full flow. 
+    
+    # Other wise should be 0
+    return 0
+  
+  def get_exposed_net_time(self, stage, baseblock=True):
+    # only use after calling compute_processing_time(), otherwise it's set witth None
+    return self.compute_net_time(stage, baseblock)
+
+  def compute_processing_time(self, stage):
+    return 0
+
+# The Expert Communication
+# This is mainly for the all2all communication
+class EXPComm(Layer):
+
+  def __init__(self, name, sys, act_size, net_id, num_peers, exp_par_comm_type,
+               in_network_reduction=False, needs_recomm=False, activation_reused=False,
+               activation_stored=True, output_stored=True):
+    self.net = sys.get_network(net_id)
+    self.num_peers = num_peers
+    self.exp_par_comm_type = exp_par_comm_type
+    
+    if self.num_peers == 1:
+      fw_flops = 0
+      bw_flops = 0
+      in_size = 0
+      out_size = 0
+      self.comm_size = 0
+    else:
+      # There are three types of expert-related communication
+      # comm: All-to-all across one expert par
+      if exp_par_comm_type == "all2all":
+        fw_flops = 0
+        bw_flops = 0
+        in_size = act_size
+        out_size = act_size
+        assert in_network_reduction == False, 'There is no computation for all2all'
+        self.comm_size = act_size
+      else:
+        self.comm_size = 0
+        
+    super().__init__(name,
+                     sys,
+                     fw_flops=fw_flops,
+                     agrad_flops=bw_flops,
+                     inputs_size=in_size,
+                     output_size=out_size,
+                     activation_space=in_size,
+                     activation_grads=out_size,
+                     needs_recomm=needs_recomm,
+                     activation_reused=activation_reused,
+                     activation_stored=activation_stored,
+                     output_stored=output_stored)
+    
+
+  def get_activation(self):
+    if self.exp_par_comm_type == 'all2all':
+      return self.activation_space * self.bytes_per_element
+    else:
+      return 0
+
+  def get_fw_mem_accessed(self):
+    if self.exp_par_comm_type == 'all2all':
+      return super().get_fw_mem_accessed()
+    else:
+      return 0
+
+  def get_activation_grad(self):
+    if self.exp_par_comm_type == 'all2all':
+      return self.activation_space * self.bytes_per_element
+    else:
+      return 0
+
+  def get_agrad_mem_accessed(self):
+    if self.exp_par_comm_type == 'all2all':
+      # Identity
+      return super().get_agrad_mem_accessed()
+    else:
+      return 0
+
+  def get_comm_bytes(self, stage, baseblock=True):
+    if self.num_peers == 1:
+      return 0
+
+    if (stage == 'fw' or stage == 'agrad') and self.exp_par_comm_type == 'all2all':
+      return self.comm_size * self.bytes_per_element
+    else:
+        # optim and wgrad stage has no comm if no ag_redo flag for RS_AG
+        return 0
+
+  def compute_net_time(self, stage, baseblock=True):
+    if self.num_peers == 1:
+      return 0
+    if self.exp_par_comm_type == "all2all":
+
+      # For all-to-all, we setup the nccl implementation of p2p, between the peers.
+      # So we adjust the chunk size to the number of expert_par accordingly.
+      comm_chunk_size = self.get_comm_bytes(stage, baseblock) // self.num_peers
+      
+      # Implemented as the p2p communication and each partition is receiving and 
+      # sending one block of the data. It communicates with num_peers - 1 units
+      fw_net_time = (self.num_peers-1) * self.net.time('all_to_all',
+        comm_chunk_size, 2)
+      bw_net_time = (self.num_peers-1) * self.net.time('all_to_all',
+        comm_chunk_size, 2)
+    else:
+      fw_net_time = 0
+      bw_net_time = 0
+    if stage == 'fw':
+      return fw_net_time 
+    elif stage == 'agrad':
+      return bw_net_time
+    elif stage == 'wgrad' or stage == 'optim':
+        return 0
+    else:
+      raise Exception(f'Bad compute stage : {stage}')
+    return 0
+
+  # This is only applied when there is overlapping between communciation and compute/mem
+  # For ep, we assume everything will be done in parallel.
+  def get_exposed_net_time(self, stage, baseblock=True):
+    # only use after calling compute_processing_time(), otherwise it's set witth None
+    # In here, we assume there is no overlapping 
     return self.compute_net_time(stage, baseblock)
 
   def compute_processing_time(self, stage):

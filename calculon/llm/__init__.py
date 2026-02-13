@@ -24,3 +24,5 @@ from .optimal_execution import OptimalExecution
 from .parameter_calculator import ParameterCalculator
 from .validation import Validation
 from .runner import Runner
+from .custom_run import CustomRunner
+from .optimal_execution_MoE import OptimalExecution_MoE

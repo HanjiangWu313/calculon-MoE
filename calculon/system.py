@@ -26,7 +26,8 @@ class System:
     'float8'   : 1,
     'float16'  : 2,
     'float32'  : 4,
-    'bfloat16' : 2
+    'bfloat16' : 2,
+    'float4' : 0.5
   }
 
   @staticmethod

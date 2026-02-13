@@ -26,6 +26,8 @@ class Runner(calculon.CommandLine):
   def create_parser(subparser):
     sp = subparser.add_parser(Runner.NAME, aliases=Runner.ALIASES,
                               help='run a single llm calculation')
+    
+    # In the main calculon starter file args.func will call the run command here
     sp.set_defaults(func=Runner.run_command)
     sp.add_argument('application', type=str,
                     help='File path to application configuration')
@@ -35,6 +37,11 @@ class Runner(calculon.CommandLine):
                     help='File path to system configuration')
     sp.add_argument('stats', type=str,
                     help='File path to stats output ("-" for stdout")')
+    # Adding the MoE
+    # sp.add_argument('MoE', type=str, default=None,
+    #                 help='File path to stats output ("-" for stdout")')
+    sp.add_argument('-m', action='store_true', help='Specify this flag to turn on MoE')
+
     sp.add_argument('-p', '--peers', type=str, default=None,
                     help='File path to write out peers file')
     sp.add_argument('-l', '--layers', action='store_true',
@@ -42,6 +49,9 @@ class Runner(calculon.CommandLine):
 
   @staticmethod
   def run_command(logger, args):
+    
+    # In the current we are running the GPT model with different 
+    # batch numbers 
     app_json = calculon.io.read_json_file(args.application)
     exe_json = calculon.io.read_json_file(args.execution)
     sys_json = calculon.io.read_json_file(args.system)
@@ -57,7 +67,8 @@ class Runner(calculon.CommandLine):
     except Llm.Error as error:
       print(f'ERROR: {error}')
       return -1
-
+    
+    
     if args.stats == '-':
       model.display_stats()
     elif calculon.is_json_extension(args.stats):
@@ -65,8 +76,8 @@ class Runner(calculon.CommandLine):
     else:
       assert False, f'unknown stats extension: {args.stats}'
 
-    if args.peers:
-      calculon.write_json_file(exe.get_peers_json(), args.peers)
+    # if args.peers:
+    #   calculon.write_json_file(exe.get_peers_json(), args.peers)
 
     return 0
 

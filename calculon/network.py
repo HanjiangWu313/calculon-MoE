@@ -21,16 +21,18 @@ class Network:
 
   kKeys = set(['bandwidth', 'efficiency', 'size', 'latency', 'ops',
                'must_be_filled', 'processor_usage'])
-  kNetOps = set(['p2p', 'reduce_scatter', 'all_gather', 'all_reduce'])
+  
+  kNetOps = set(['p2p', 'reduce_scatter', 'all_gather', 'all_reduce', 'all_to_all'])
+  # kCollectives = set(['reduce_scatter', 'all_gather', 'all_reduce', 'all_to_all'])
   kCollectives = set(['reduce_scatter', 'all_gather', 'all_reduce'])
-
   class Op:
-    def __init__(self, scalar, offset):
+    def __init__(self, scalar, offset, efficiency=0):
       self.scalar = scalar
       self.offset = offset
+      self.efficiency = efficiency
 
   @staticmethod
-  def _parse_op(op, scalar, offset):
+  def _parse_op(op, scalar, offset, efficiency=0):
     assert op in Network.kNetOps, f'Invalid network op: {op}'
     assert scalar > 0.0, f'Invalid network scalar for {op}: {scalar}'
     if op in Network.kCollectives:
@@ -38,7 +40,10 @@ class Network:
       return Network.Op(scalar, offset)
     else:
       assert offset is None, f'Can\'t give offset for {op}'
-      return Network.Op(scalar, 0)
+      if not efficiency == 0:
+        return Network.Op(scalar, 0, efficiency)
+      else:
+        return Network.Op(scalar, 0)
 
   def __init__(self, cfg):
     assert Network.kKeys == set(cfg.keys())
@@ -51,11 +56,17 @@ class Network:
     self._latency = cfg['latency']
     self._ops = {}
     for op in cfg['ops']:
-      self._ops[op] = Network._parse_op(
-        op, cfg['ops'][op][0], cfg['ops'][op][1])
+      # Only some of the ops have the communication efficiency
+      if len(cfg['ops'][op]) == 3:
+        self._ops[op] = Network._parse_op(
+        op, cfg['ops'][op][0], cfg['ops'][op][1], cfg['ops'][op][2])
+      else:
+        self._ops[op] = Network._parse_op(
+          op, cfg['ops'][op][0], cfg['ops'][op][1])
     assert set(self._ops.keys()) == Network.kNetOps
     self._must_be_filled = cfg['must_be_filled']
     self._proc_usage = cfg['processor_usage']
+    self.op_size = 0
     assert self._proc_usage >= 0.0 and self._proc_usage < 1.0
 
   @property
@@ -94,6 +105,10 @@ class Network:
     # Scales the op_size by the op offset
     chunk_size = 1 / comm_size * op_size
     op_size += chunk_size * self._ops[op].offset
-
+    
+    self.op_size = op_size
     # Calculates time based on raw bandwidth,  bandwidth efficiency, and latency
-    return self._latency + op_size / (self._bw * self._eff)
+    if self._ops[op].efficiency:
+      return self._latency + op_size / (self._bw * self._ops[op].efficiency)
+    else:
+      return self._latency + op_size / (self._bw * self._eff)

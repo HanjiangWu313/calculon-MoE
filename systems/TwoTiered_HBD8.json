@@ -68,7 +68,8 @@
         "p2p": [1.0, null],
         "reduce_scatter": [1.0, 0],
         "all_gather": [1.0, 0],
-        "all_reduce": [1.0, 1]
+        "all_reduce": [1.0, 1],
+        "all_to_all": [1.0, null]
       },
       "must_be_filled": true,
       "processor_usage": 0.15
@@ -81,7 +82,8 @@
         "p2p": [1.0, null],
         "reduce_scatter": [1.0, 0],
         "all_gather": [1.0, 0],
-        "all_reduce": [1.0, 0]
+        "all_reduce": [1.0, 0],
+        "all_to_all": [1.0, null]
       },
       "must_be_filled": false,
       "processor_usage": 0.02

@@ -81,7 +81,8 @@ class OptimalExecution(calculon.CommandLine):
         args.num_procs, app.hidden, app.attn_heads):
       for pp in Llm.get_all_pipeline_parallelisms(
           args.num_procs, tp, app.num_blocks):
-        dp = Llm.get_data_parallelism(args.num_procs, tp, pp)
+        dp = Llm.get_data_parallelism_original(args.num_procs, tp, pp)
+        print(f'pp: {pp}, tp: {tp}, dp: {dp}')
         for ppint in Llm.get_valid_pipeline_interleavings(app.num_blocks, pp):
           batch_size = OptimalExecution.get_batch_size(dp, args.max_batch_size)
           if batch_size is None:
@@ -219,6 +220,14 @@ class OptimalExecution(calculon.CommandLine):
                             'data_par_net': dn,
                             'batch_size': batch_size,
                             'microbatch_size': microbatch_size,
+                            "num_experts": 1,
+                            "top_k_experts": 1,
+                            "expert_par": 1,
+                            "expert_slice": 1,
+                            "data_par_exp": 1,
+                            "data_par_exp_net": 1,
+                            "expert_par_net": 1,
+                            "expert_slice_net": 1,
                             'datatype': datatype,
                             'fused_activation': fused_act,
                             'attention_type': 'multihead',
@@ -232,7 +241,8 @@ class OptimalExecution(calculon.CommandLine):
                             'weight_offload': weight_offload,
                             'activations_offload': activations_offload,
                             'optimizer_offload': optimizer_offload,
-                            'training': True
+                            'training': True,
+                            "model_MoE": False
                           }
 
                           if not debug:

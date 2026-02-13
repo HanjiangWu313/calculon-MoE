@@ -1,7 +1,25 @@
 {
   "matrix" : {
     "float16": {
-      "tflops": 312,
+      "tflops": 5000,
+      "gflops_efficiency": [
+        [128, 0.99],
+        [16, 0.9],
+        [1, 0.6],
+        [0, 0.1]
+      ]
+    },
+    "float8": {
+      "tflops": 10000,
+      "gflops_efficiency": [
+        [128, 0.9],
+        [16, 0.9],
+        [1, 0.6],
+        [0, 0.1]
+      ]
+    },
+    "float4": {
+      "tflops": 9000,
       "gflops_efficiency": [
         [128, 0.95],
         [16, 0.9],
@@ -18,11 +36,27 @@
         [1, 0.5],
         [0, 0.1]
       ]
+    },
+    "float8": {
+      "tflops": 78,
+      "gflops_efficiency": [
+        [16, 0.95],
+        [1, 0.5],
+        [0, 0.1]
+      ]
+    },
+    "float4": {
+      "tflops": 78,
+      "gflops_efficiency": [
+        [16, 0.95],
+        [1, 0.5],
+        [0, 0.1]
+      ]
     }
   },
   "mem1": {
-    "GiB": 80,
-    "GBps": 2048,
+    "GiB": 384,
+    "GBps": 16384,
     "MB_efficiency": [
       [100, 0.90],
       [10, 0.75],
@@ -31,8 +65,8 @@
     ]
   },
   "mem2": {
-    "GiB": 512,
-    "GBps": 32,
+    "GiB": 480,
+    "GBps": 512,
     "MB_efficiency": [
       [100, 0.95],
       [10, 0.9],
@@ -43,9 +77,9 @@
   "processing_mode": "no_overlap",
   "networks": [
     {
-      "bandwidth": 300,
+      "bandwidth": 1800,
       "efficiency": 0.65,
-      "size": 4096,
+      "size": 8,
       "latency": 0.00001,
       "ops": {
         "p2p": [1.0, null],

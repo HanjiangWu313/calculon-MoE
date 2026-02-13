@@ -1,0 +1,110 @@
+{
+    "matrix" : {
+      "float16": {
+        "tflops": 4600,
+        "gflops_efficiency": [
+          [128, 0.99],
+          [16, 0.9],
+          [1, 0.6],
+          [0, 0.1]
+        ]
+      },
+      "float8": {
+        "tflops": 9200,
+        "gflops_efficiency": [
+          [128, 0.99],
+          [16, 0.9],
+          [1, 0.6],
+          [0, 0.1]
+        ]
+      },
+      "float4": {
+        "tflops": 18400,
+        "gflops_efficiency": [
+          [128, 0.99],
+          [16, 0.9],
+          [1, 0.6],
+          [0, 0.1]
+        ]
+      }
+    },
+    "vector": {
+      "float16": {
+        "tflops": 575,
+        "gflops_efficiency": [
+          [16, 0.95],
+          [1, 0.5],
+          [0, 0.1]
+        ]
+      },
+      "float8": {
+        "tflops": 1150,
+        "gflops_efficiency": [
+          [16, 0.95],
+          [1, 0.5],
+          [0, 0.1]
+        ]
+      },
+      "float4": {
+        "tflops": 0,
+        "gflops_efficiency": [
+          [16, 0.95],
+          [1, 0.5],
+          [0, 0.1]
+        ]
+      }
+    },
+    "mem1": {
+      "GiB": 432,
+      "GBps": 30000,
+      "MB_efficiency": [
+        [100, 0.90],
+        [10, 0.75],
+        [1, 0.6],
+        [0, 0.3]
+      ]
+    },
+    "mem2": {
+      "GiB": 480,
+      "GBps": 256,
+      "MB_efficiency": [
+        [100, 0.95],
+        [10, 0.9],
+        [1, 0.7],
+        [0, 0.3]
+      ]
+    },
+    "processing_mode": "no_overlap",
+    "networks": [
+      {
+        "bandwidth": 1600,
+        "efficiency": 0.8,
+        "size": 64,
+        "latency": 0.0000005,
+        "ops": {
+        "p2p": [1.0, null],
+        "reduce_scatter": [1.5, -1],
+        "all_gather": [1.5, -1],
+        "all_reduce": [2.0, -1],
+        "all_to_all": [1.0, null]
+        },
+        "must_be_filled": false,
+        "processor_usage": 0.15
+      },{
+        "bandwidth": 200,
+        "efficiency": 0.8,
+        "size": 131072,
+        "latency": 0.000002,
+        "ops": {
+          "p2p": [1.0, null],
+          "reduce_scatter": [1.5, -1],
+          "all_gather": [1.5, -1],
+          "all_reduce": [2.0, -1],
+          "all_to_all": [1.0, null]
+        },
+        "must_be_filled": false,
+        "processor_usage": 0.02
+      }
+    ]
+  }
+  

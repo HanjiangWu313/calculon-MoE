@@ -27,7 +27,7 @@ from calculon.llm import *
 class Validation(calculon.CommandLine):
   NAME = 'llm-validation'
   ALIASES = ['lv']
-
+  
   @staticmethod
   def create_parser(subparser):
     sp = subparser.add_parser(

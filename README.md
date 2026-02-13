@@ -1,54 +1,56 @@
 [![DOI](https://zenodo.org/badge/660734586.svg)](https://zenodo.org/badge/latestdoi/660734586)
-# Calculon - Co-design for large scale parallel applications
+# Calculon-MoE - An extension of Calculon to support the modeling of MoE model architecture
 
-## Running
-
-Run Calculon like this:
+### Setup with Conda 
+If you don't have conda available:
+```sh
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash Miniconda3-latest-Linux-x86_64.sh -b -p $HOME/miniconda3
+$HOME/miniconda3/bin/conda init bash
+```
+### Assuming the base conda has been activated already
 ``` sh
-$> PYTHONPATH=. ./bin/ <args>
+conda env create -f environment.yml --name calculon-moe
+conda activate calculon-moe
 ```
 
-Calculon is a hierarchical command line. To see the commands it accepts, use `--help` or `-h`:
+## Running dense LLM Example (calculon)
+
+### Performance output of a single run for the specified model and system configs
+
 ``` sh
-$> PYTHONPATH=. ./bin/ -h
+$ PYTHONPATH=. ./bin/calculon llm models/megatron-1T.json examples/megatron_1T_training_4096_original.json systems/a100_80g.json -
 ```
 
-You can also see how to use any command specifically by using `--help` or `-h` on the command:
+### Search the best config sweeping different system setups under constraints for the input model
+
 ``` sh
-$> PYTHONPATH=. ./bin/ llm -h
+$ PYTHONPATH=. ./bin/calculon llm-optimal-execution models/megatron-1T.json 5128 2520 float16 systems/a100_80g.json output.json -m
 ```
 
-## LLM Example
+## Running MoE LLM Example (calculon-MoE)
 
-Run a single calculation for LLM (~1 sec):
+### Performance output of a single run for the specified model and system configs
+
+Run a single calculon training modeling with GPT-like 1.8T MoE Transformer model (models/gpt-1.8T.json) and 4096 H100_80g GPUs (systems/H100_80g_2.json) used. In the exection script (examples/gpt_1.8_training_4096.json), it includes the details of the execution trace.
+
 ``` sh
-$> PYTHONPATH=. ./bin/ llm models/megatron-1T.json examples/3072_t4_p64_d12_mbs4_full.json systems/a100_80g.json -
+$ PYTHONPATH=. ./bin/calculon llm models/gpt-1.8T_2.json examples/gpt_1.8_training_4096.json systems/H100_80g_sxm.json -
 ```
 
-Run a system execution optimizer for LLM (~1 min):
-``` sh
-$> PYTHONPATH=. ./bin/ llm-optimal-execution models/turing-530B.json 5128 2520 float16 systems/a100_80g.json output.json -m
-```
-`opt_exe.json` will contain the optimal way to run Turing-530B across 5128 A100 GPUs.
+### Running MoE LLM optimal search for the best config (calculon-MoE)
 
-To store results from all successful runs from the same experiment, run a special system optimizer (~1 min):
-``` sh
-$> PYTHONPATH=. ./bin/ llm-all-executions models/turing-530B.json 5128 2520 float16 systems/a100_80g.json all_output.csv
-```
-
-## Testing and validation (optional)
-To make sure that the current build is working, use
+Run a system execution optimizer for Searching the space for GPT-like 1.8T Transformer. The following example searches the parallelization technique for 4096 H100 GPUs and the Batch Size is 2048 which is specified internally in the calculon/llm/optimal_execution_MoE file:
 
 ``` sh
-$> make test
-```
-To validate Calculon performance modeling against Megatron run on NVIDIA's Selene A100-based supercomputer with results published in ["Sequence parallelism" paper](https://arxiv.org/abs/2205.05198), use
-
-``` sh
-$> PYTHONPATH=. ./bin/calculon llm-validation
+$ PYTHONPATH=. ./bin/calculon llm-optimal-execution-moe models/gpt-1.8T_2.json 4096 2048 float16 systems/H100_80g_sxm.json output_gpt-1.8T_4096_2048.json -moe 16
 ```
 
 ## Publications
+
+* Scaling Intelligence: Designing Data Centers for Next-Gen Language Models \
+Jesmin Jahan Tithi, Hanjiang Wu, Avishaii Abuhatzera, Fabrizio Petrini \
+[Paper](https://arxiv.org/abs/2506.15006)
 
 * Calculon: A Methodology and Tool for High-Level Co-Design of Systems and Large Language Models\
 Mikhail Isaev, Nic McDonald, Larry Dennison, Richard Vuduc\

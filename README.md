@@ -12,6 +12,8 @@ $HOME/miniconda3/bin/conda init bash
 ``` sh
 conda env create -f environment.yml --name calculon-moe
 conda activate calculon-moe
+Inside calculon-MoE folder, do:
+make
 ```
 
 ## Running dense LLM Example (calculon)
@@ -19,13 +21,13 @@ conda activate calculon-moe
 ### Performance output of a single run for the specified model and system configs
 
 ``` sh
-$ PYTHONPATH=. ./bin/calculon llm models/megatron-1T.json examples/megatron_1T_training_4096_original.json systems/a100_80g.json -
+PYTHONPATH=. ./bin/calculon llm models/megatron-1T.json examples/megatron_1T_training_4096_original.json systems/a100_80g.json -
 ```
 
 ### Search for the best config sweeping different system setups under constraints for the input model
 
 ``` sh
-$ PYTHONPATH=. ./bin/calculon llm-optimal-execution models/megatron-1T.json 5128 2520 float16 systems/a100_80g.json output.json -m
+PYTHONPATH=. ./bin/calculon llm-optimal-execution models/megatron-1T.json 5128 2520 float16 systems/a100_80g.json output.json -m
 ```
 
 ## Running MoE LLM Example (calculon-MoE)
@@ -35,7 +37,7 @@ $ PYTHONPATH=. ./bin/calculon llm-optimal-execution models/megatron-1T.json 5128
 Run a single calculon training modeling with GPT-like 1.8T MoE Transformer model (models/gpt-1.8T.json) and 4096 H100_80g GPUs (systems/H100_80g.json) used. The execution script (examples/gpt_1.8_training_4096.json) includes the details of the parameters (i.e., TP/DP/PP/EP/ES, etc) used for the execution.
 
 ``` sh
-$ PYTHONPATH=. ./bin/calculon llm models/gpt-1.8T.json examples/gpt_1.8_training_4096.json systems/H100_80g_sxm.json -
+PYTHONPATH=. ./bin/calculon llm models/gpt-1.8T.json examples/gpt_1.8_training_4096.json systems/H100_80g_sxm.json -
 ```
 
 ### Running MoE LLM optimal search for the best config (calculon-MoE)
@@ -43,7 +45,7 @@ $ PYTHONPATH=. ./bin/calculon llm models/gpt-1.8T.json examples/gpt_1.8_training
 Run a system execution optimizer for searching the space for GPT-like 1.8T Transformer. The following example searches the parallelization technique for 4096 H100 GPUs, and the Batch Size is 2048, which is specified internally in the calculon/llm/optimal_execution_MoE file:
 
 ``` sh
-$ PYTHONPATH=. ./bin/calculon llm-optimal-execution-moe models/gpt-1.8T_2.json 4096 2048 float16 systems/H100_80g_sxm.json output_gpt-1.8T_4096_2048.json -moe 16
+PYTHONPATH=. ./bin/calculon llm-optimal-execution-moe models/gpt-1.8T.json 4096 2048 float16 systems/H100_80g_sxm.json output_gpt-1.8T_4096_2048.json -moe 16
 ```
 
 ## Publications

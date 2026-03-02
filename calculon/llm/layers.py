@@ -1201,45 +1201,6 @@ class TensorTrans(Layer):
     return self.get_fw_mem_accessed()
 
 
-#  This is the Communication between the expert slice dimension
-class ESComm(Layer):
-  
-  def __init__(self, name, sys, act_size, net_id, num_peers, exp_par_comm_type,
-               in_network_reduction=False, needs_recomm=False, activation_reused=False,
-               activation_stored=True, output_stored=True):
-    self.comm_size = act_size
-    self.name = name
-    self.net = sys.get_network(net_id)
-    self.num_peers = num_peers
-    
-    self.exp_par_comm_type = exp_par_comm_type
-  def get_comm_bytes(self, stage, baseblock=True):
-    # Get the bytes to communicate within the loop
-    if stage == 'fw':
-      return self.comm_size * self.bytes_per_element
-  def compute_net_time(self, stage, baseblock=True):
-    
-    if stage == 'fw':
-      fw_net_time = self.net.time('all_gather',
-      self.get_comm_bytes(stage, baseblock), self.num_peers)
-      return fw_net_time
-    elif stage == 'agrad' or stage == 'wgrad':
-      _net_time = self.net.time('all_gather',
-      self.get_comm_bytes(stage, baseblock), self.num_peers)
-      return fw_net_time
-    # In bw, it should be all_gather as well, but needs to check it
-    # out with the full flow. 
-    
-    # Other wise should be 0
-    return 0
-  
-  def get_exposed_net_time(self, stage, baseblock=True):
-    # only use after calling compute_processing_time(), otherwise it's set witth None
-    return self.compute_net_time(stage, baseblock)
-
-  def compute_processing_time(self, stage):
-    return 0
-
 # The Expert Communication
 # This is mainly for the all2all communication
 class EXPComm(Layer):

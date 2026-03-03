@@ -124,12 +124,12 @@ class Layer:
       human_format(self.get_fw_mem_accessed(), 'bytes'))
     stats += " FW AI: {0:.3f}\n".format(self.get_fw_arithmetic_intensity())
     stats += "{0} BW Adrad flops, {1} BW Agrad bytes accessed,".format(
-      human_format(self.get_agrard_flops(), 'flops'),
+      human_format(self.get_agrad_flops(), 'flops'),
       human_format(self.get_agrad_mem_accessed(), 'bytes'))
     stats += " BW Agrad AI: {0:.3f}\n".format(
       self.get_agrad_arithmetic_intensity())
     stats += "{0} BW Wdrad flops, {1} BW Wgrad bytes accessed,".format(
-      human_format(self.get_wgrard_flops(), 'flops'),
+      human_format(self.get_wgrad_flops(), 'flops'),
       human_format(self.get_wgrad_mem_accessed(), 'bytes'))
     stats += " BW Wgrad AI: {0:.3f}\n".format(
       self.get_wgrad_arithmetic_intensity())
@@ -627,9 +627,24 @@ class LinearOverlapped(Layer):
     return self.processing_time
 
   def get_exposed_net_time(self, stage, baseblock=True):
-    # only use after calling compute_processing_time(), otherwise it's set with None
-    assert self._processed_flag
-    return self.net_exposed_time
+    # Recompute by requested block type so base/edge differ for p2p_rs_ag.
+    flop_time = self.compute_flops_time(stage)
+    flop_time_slowed = flop_time / (1 - self.net.processor_usage)
+    net_time = self.compute_net_time(stage, baseblock=baseblock)
+    if net_time == 0:
+      return 0
+
+    net_tile = net_time / self.num_tiles
+    flop_tile_slowed = flop_time_slowed / self.num_tiles
+    overlap_inflection = net_tile - flop_tile_slowed
+    if overlap_inflection > 0:
+      net_exposed_time = (self.num_tiles - 1) * overlap_inflection
+    else:
+      net_exposed_time = 0
+
+    if self.tp_overlap == 'pipe':
+      net_exposed_time += net_tile
+    return net_exposed_time
 
   def get_required_bandwidth(self, stage, baseblock=True):
     assert self._processed_flag
@@ -648,7 +663,6 @@ class LinearOverlapped_All2All(Layer):
     m, n, k = batch_seq, c_in, c_out
     # num_tiles is the EP number
     self.num_tiles = num_tiles
-    print(f"netid: {net_id}")
     self.net = sys.get_network(net_id)
     # num_peers is the EP number
     self.num_peers = num_peers
@@ -734,7 +748,6 @@ class LinearOverlapped_All2All(Layer):
     compute_time = self.sys.get_processing_time(flop_time, mem_time)
 
     compute_time_per_tile = flop_time / self.num_tiles
-    print(f"net time: {net_time}, compute time: {compute_time_per_tile}")
     time = compute_time_per_tile + (self.num_tiles-1) * max(net_time_per_tile, compute_time_per_tile)
     if net_time == 0:
       time = compute_time
@@ -1229,7 +1242,7 @@ class EXPComm(Layer):
         assert in_network_reduction == False, 'There is no computation for all2all'
         self.comm_size = act_size
       else:
-        self.comm_size = 0
+        raise ValueError(f'Unsupported expert communication type: {exp_par_comm_type}')
         
     super().__init__(name,
                      sys,
@@ -1287,7 +1300,7 @@ class EXPComm(Layer):
 
       # For all-to-all, we setup the nccl implementation of p2p, between the peers.
       # So we adjust the chunk size to the number of expert_par accordingly.
-      comm_chunk_size = self.get_comm_bytes(stage, baseblock) // self.num_peers
+      comm_chunk_size = self.get_comm_bytes(stage, baseblock) / self.num_peers
       
       # Implemented as the p2p communication and each partition is receiving and 
       # sending one block of the data. It communicates with num_peers - 1 units

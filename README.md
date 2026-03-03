@@ -13,7 +13,7 @@ $HOME/miniconda3/bin/conda init bash
 conda env create -f environment.yml --name calculon-moe
 conda activate calculon-moe
 Inside calculon-MoE folder, do:
-make
+make install
 ```
 
 ## Running dense LLM Example (calculon)

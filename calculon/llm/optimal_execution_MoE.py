@@ -76,62 +76,69 @@ class OptimalExecution_MoE(calculon.CommandLine):
     app = Llm.Application(calculon.io.read_json_file(args.application))
     syst = System(calculon.io.read_json_file(args.system))
 
-    # Change the parameter of number of experts
     num_experts = args.moe
     
-    # microbatch_size = 32
     params = []
       
     batch_size = 1024
-    # dp =  batch_size // microbatch_size
     
     print('Running Configs')
-    #print(args.num_procs)
 
     count = 0
 
     for ep in Llm.get_all_expert_parallelisms(num_experts, args.num_procs):
-      for tp in Llm.get_all_tensor_parallelisms(
-        args.num_procs // ep, app.hidden, app.attn_heads):
-        # Hidden size must be multiples of tp
-        es = tp
-        if (not (app.hidden % tp == 0)):
-          continue
-        #print(tp)
-        for pp in Llm.get_all_pipeline_parallelisms(args.num_procs, tp*ep, app.num_blocks):
-          if( app.num_blocks % pp != 0 or args.num_procs%(ep*tp*pp)!=0) :
-            continue
-          # Get the number of processors left
-          procs_left_nonMoE = args.num_procs // pp // tp
-          procs_left_MoE = args.num_procs // tp // ep // pp
-          # Change the batch size and get script for different conditions
-          # We can make a graph 
-          batch_size = OptimalExecution.get_batch_size(procs_left_nonMoE, args.max_batch_size)
-          if (batch_size == None):
-            continue
-          if(procs_left_nonMoE > batch_size):
-              #print("Process left ", procs_left_nonMoE, "batch size ", batch_size)
-              procs_left_nonMoE = batch_size
-          if((not (batch_size % procs_left_nonMoE == 0))):
+      remaining_procs_after_ep = args.num_procs//ep   
+      for pp in Llm.get_all_pipeline_parallelisms(remaining_procs_after_ep, app.num_blocks):
+          if (app.num_blocks % pp!= 0 and args.num_procs%pp!=0):
               continue
-          dp = procs_left_nonMoE
-          dp_exp = procs_left_MoE
-          #print(dp)
-          # microbatch_size = batch_size / procs_left
-          for ppint in Llm.get_valid_pipeline_interleavings(app.num_blocks, pp):
-            #print(f'pp: {pp}, ep: {ep}, tp: {tp}, dp: {dp}, dp_exp: {dp_exp}, ppint: {ppint}')
-            # attn_only is not supported for now.
-            for activation_recompute in ['none', 'full', 'attn_only']:
-            #for activation_recompute in ['none']:
-                for optimizer_sharding in pick(dp>1, [True, False], [False]):
-                    for tensor_par_comm_type in ['ar', 'p2p_rs_ag', 'rs_ag']:
-                        count += 1
-                        params.append(
-                        (args, args.debug, args.top_n, args.layers, args.num_procs,
-                        args.datatype, num_experts, app, syst, ep, es, tp, pp, dp, dp_exp,
-                        ppint, batch_size, activation_recompute, optimizer_sharding,
-                        tensor_par_comm_type, args.fused_activation,
-                        not args.no_tp_overlap, not args.no_dp_overlap))
+          es_list = []
+          tp_list = []
+          remaining_procs_after_ep_pp = remaining_procs_after_ep//pp
+          
+          for es in Llm.get_all_expert_slice_parallelisms(remaining_procs_after_ep_pp, app.hidden):
+            if( args.num_procs%(ep*es*pp)!=0) :
+                    continue
+            es_list.append(es)
+          for tp in Llm.get_all_tensor_parallelisms(remaining_procs_after_ep_pp, app.hidden, app.attn_heads):
+            # Hidden size must be multiples of tp
+            if(args.num_procs%(tp*pp)!=0) :
+                continue
+            tp_list.append(tp)
+            
+            
+          for es in  es_list:
+              for tp in tp_list:
+                #making pp uniform for both MOE/non-MOE!
+                  # Get the number of processors left
+                  procs_left_nonMoE = args.num_procs // pp // tp
+                  procs_left_MoE = args.num_procs // es // ep // pp
+                  # Change the batch size and get script for different conditions
+                  # We can make a graph 
+                  batch_size = OptimalExecution.get_batch_size(procs_left_nonMoE, args.max_batch_size)
+                  if (batch_size == None):
+                    continue
+                  if(procs_left_nonMoE > batch_size):
+                      #print("Process left ", procs_left_nonMoE, "batch size ", batch_size)
+                      procs_left_nonMoE = batch_size
+                  if((not (batch_size % procs_left_nonMoE == 0))):
+                      continue
+                  dp = procs_left_nonMoE
+                  dp_exp = procs_left_MoE
+                  # microbatch_size = batch_size / procs_left
+                  for ppint in Llm.get_valid_pipeline_interleavings(app.num_blocks, pp):
+                    print(f'pp: {pp}, ep: {ep}, es: {es}, tp: {tp}, dp: {dp}, dp_exp: {dp_exp}, ppint: {ppint}')
+                    # attn_only is not supported for now.
+                    #for activation_recompute in ['none', 'full', 'attn_only']:
+                    for activation_recompute in ['none']:
+                        for optimizer_sharding in pick(dp>1, [True, False], [False]):
+                            for tensor_par_comm_type in ['ar', 'p2p_rs_ag', 'rs_ag']:
+                                count += 1
+                                params.append(
+                                (args, args.debug, args.top_n, args.layers, args.num_procs,
+                                args.datatype, num_experts, app, syst, ep, es, tp, pp, dp, dp_exp,
+                                ppint, batch_size, activation_recompute, optimizer_sharding,
+                                tensor_par_comm_type, args.fused_activation,
+                                not args.no_tp_overlap, not args.no_dp_overlap))
 
     print(f'number of param combinations: {len(params)}')
     # Runs parallel searches

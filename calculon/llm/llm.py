@@ -17,6 +17,7 @@
 
 from calculon import *
 from .layers import *
+import math
 
 
 class Llm:
@@ -280,6 +281,9 @@ class Llm:
         yield cand     
   @staticmethod
   def get_all_expert_parallelisms(num_experts, num_procs):
+    yield num_experts
+  @staticmethod
+  def get_all_expert_parallelisms_flexible(num_experts, num_procs):
     max_ep = min(num_experts, num_procs)  
     for cand in  Llm._factors(max_ep):
         if num_experts % cand == 0:
@@ -298,12 +302,12 @@ class Llm:
     yield num_experts
   '''
   @staticmethod
-  def get_all_pipeline_parallelisms(num_procs, num_blocks):
+  def get_all_pipeline_parallelisms_flexible(num_procs, num_blocks):
     max_pp = min(num_procs, num_blocks) 
     for cand in Llm._factors(max_pp):
-       if (num_blocks % cand == 0 and num_procs % cand == 0):
+       if (num_blocks % cand == 0):
                yield cand
-  '''             
+               
   #  The number of num_blocks does not have to be exactly divisible by pp 
   @staticmethod
   def get_all_pipeline_parallelisms(num_procs, tensor_par, num_blocks):
@@ -314,7 +318,7 @@ class Llm:
        if (num_procs % (tensor_par * cand) == 0 and
            num_blocks % cand == 0):
                yield cand
-  '''      
+       
   #  Special Case for strong scaling
   @staticmethod
   def get_pipeline_parallelism(num_procs, tensor_par, num_blocks):
@@ -1737,7 +1741,9 @@ class Llm:
       "RouterBlock_All2All_Expert", 
       self.sys,
       # This is the input size of an involving expert processor 
-      pick(self.exe._sequence_par, self._batch_seq * self.exe.k // self.exe.sequence_par * self.app.hidden, 
+      # With SP active each GPU holds batch_seq/SP tokens; matches MlpBlock_All2All_MoE_Expert
+      pick(self.exe._sequence_par,
+           self._batch_seq * self.exe.k // self.exe.sequence_par * self.app.hidden,
            self._batch_seq * self.exe.k * self.app.hidden),
       # The network tier used by expert parallelism
       self.exe.expert_par_net, 
@@ -1751,11 +1757,9 @@ class Llm:
     self._llm_block.append(TPComm(
       "RouterBlock_Gather_ExpertSlice",
       self.sys,
-      # Gather over ES should communicate the full tensor once.
-      # With sequence parallelism enabled, this tensor is already sequence-sharded.
-      pick(self.exe._sequence_par,
-           self._batch_seq * self.app.hidden * self.exe.k // self.exe.sequence_par,
-           self._batch_seq * self.app.hidden * self.exe.k),
+      # Symmetric conjugate of MlpBlock_Reduce_MoE_ExpertSlice (rs_ag, conjugate=True).
+      # act_size = post-AllGather output = batch_seq/expert_par * k * hidden.
+      self._batch_seq_exp * self.exe.k * self.exe._experts_per_par * self.app.hidden,
       self.exe.expert_slice_net,
       self.exe.expert_slice,
       tensor_par_comm_type="rs_ag",
@@ -3400,20 +3404,27 @@ class Llm:
     return time
 
   def get_useful_flops(self):
-    total_flops = sum(
+    # FW (and BW if training) flops scale with both blocks_per_proc and
+    # num_microbatches because each microbatch does a full fwd/bwd pass.
+    fw_bw_flops = sum(
       [block.get_fw_flops() for block in self._llm_block])
     if self.exe.training:
-      total_flops += sum(
-        [block.get_agrad_flops() + block.get_wgrad_flops() + \
-          block.get_optim_step_flops() for block in self._llm_block])
+      fw_bw_flops += sum(
+        [block.get_agrad_flops() + block.get_wgrad_flops()
+         for block in self._llm_block])
+    total_flops = self._blocks_per_proc * self.exe._num_microbatches * fw_bw_flops
+    # Optimizer step is performed once per global batch (not per microbatch),
+    # so it only scales with blocks_per_proc.
+    if self.exe.training:
+      optim_flops = sum(
+        [block.get_optim_step_flops() for block in self._llm_block])
+      total_flops += self._blocks_per_proc * optim_flops
     return total_flops
 
   def get_compute_efficiency(self):
-    total_flops = self.get_useful_flops()
     compute_time = self.get_fw_time() + self.get_bw_time() + \
       self.get_optim_step_time()
-    perfect_time = self._blocks_per_proc * self.exe._num_microbatches * \
-      total_flops / self.sys.matrix.flops(self.exe.datatype)
+    perfect_time = self.get_useful_flops() / self.sys.matrix.flops(self.exe.datatype)
     return perfect_time / compute_time
 
   def get_system_efficiency(self):
@@ -3422,9 +3433,7 @@ class Llm:
     return compute_time / self.get_total_time()
 
   def get_total_efficiency(self):
-    total_flops = self.get_useful_flops()
-    perfect_time = self._blocks_per_proc * self.exe._num_microbatches * \
-      total_flops / self.sys.matrix.flops(self.exe.datatype)
+    perfect_time = self.get_useful_flops() / self.sys.matrix.flops(self.exe.datatype)
     return perfect_time / self.get_total_time()
 
   def get_weight_space_min(self):

@@ -16,7 +16,7 @@
 """
 
 from calculon import *
-
+import math
 
 class Layer:
   """
@@ -1300,7 +1300,7 @@ class EXPComm(Layer):
 
       # For all-to-all, we setup the nccl implementation of p2p, between the peers.
       # So we adjust the chunk size to the number of expert_par accordingly.
-      comm_chunk_size = self.get_comm_bytes(stage, baseblock) / self.num_peers
+      comm_chunk_size = math.ceil(self.get_comm_bytes(stage, baseblock) / self.num_peers)
       
       # Implemented as the p2p communication and each partition is receiving and 
       # sending one block of the data. It communicates with num_peers - 1 units

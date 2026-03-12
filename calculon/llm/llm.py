@@ -1638,13 +1638,12 @@ class Llm:
     self._llm_block.append(EXPComm(
       "MlpBlock_All2All_MoE_Expert", 
       self.sys,
-      # This should be the per proc number to communciate
-      # We are sending the Tokens * Hidden size and that Tokens-Expert just
-      # notifies where to send
-      pick(self.exe._sequence_par, self._batch_seq * self.exe.k // self.exe.sequence_par * self.app.hidden, 
-          self._batch_seq * self.exe.k * self.app.hidden),
+      # Symmetric with RouterBlock_All2All_Expert (same volume, reverse direction).
+      # With SP active, each TP/SP GPU holds batch_seq/SP * k * hidden.
+      pick(self.exe._sequence_par,
+           self._batch_seq * self.exe.k // self.exe.sequence_par * self.app.hidden,
+           self._batch_seq * self.exe.k * self.app.hidden),
       self.exe.expert_par_net, 
-      # This is the number of procs involved in the communciation
       self.exe.expert_par, 
       "all2all",
       in_network_reduction=False, needs_recomm=False, activation_reused=False,
@@ -1849,9 +1848,10 @@ class Llm:
     
     # Tokens distributed to each expert (balanced-load assumption).
     # We track per-expert tokens before top-k multiplication.
+    
     self._batch_seq_exp = self.exe.microbatch_size * self.app.seq_size / self.exe.num_experts
-
     self._batch_seq = self.exe.microbatch_size * self.app.seq_size
+    
     self._activation_size = self._batch_seq * self.app.hidden
     self._batch_seq_par = self._batch_seq // self.exe.tensor_par
     

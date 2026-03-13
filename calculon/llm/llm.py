@@ -17,7 +17,6 @@
 
 from calculon import *
 from .layers import *
-import math
 
 
 class Llm:
@@ -265,6 +264,7 @@ class Llm:
   def get_all_tensor_parallelisms(num_procs, hidden, attn_heads):
     for cand in Llm._factors(num_procs):
       if hidden % cand == 0 and attn_heads % cand == 0:
+        #if hidden % cand == 0:
         yield cand
         
   @staticmethod
@@ -274,21 +274,7 @@ class Llm:
     for cand in Llm._factors(max_exp_slice):
       if hidden % cand == 0:
         yield cand
-  @staticmethod
-  def get_all_expert_slice_parallelisms(num_procs, hidden):
-    for cand in Llm._factors(num_procs):
-      if hidden % cand == 0:
-        yield cand     
-  @staticmethod
-  def get_all_expert_parallelisms(num_experts, num_procs):
-    yield num_experts
-  @staticmethod
-  def get_all_expert_parallelisms_flexible(num_experts, num_procs):
-    max_ep = min(num_experts, num_procs)  
-    for cand in  Llm._factors(max_ep):
-        if num_experts % cand == 0:
-         yield cand
-  '''    
+        
   @staticmethod
   def get_all_expert_parallelisms(num_experts, num_procs):
     max_ep = min(num_experts, num_procs)
@@ -300,14 +286,7 @@ class Llm:
     #   if num_experts % cand == 0:
     #     yield cand
     yield num_experts
-  '''
-  @staticmethod
-  def get_all_pipeline_parallelisms_flexible(num_procs, num_blocks):
-    max_pp = min(num_procs, num_blocks) 
-    for cand in Llm._factors(max_pp):
-       if (num_blocks % cand == 0):
-               yield cand
-               
+
   #  The number of num_blocks does not have to be exactly divisible by pp 
   @staticmethod
   def get_all_pipeline_parallelisms(num_procs, tensor_par, num_blocks):
@@ -318,7 +297,17 @@ class Llm:
        if (num_procs % (tensor_par * cand) == 0 and
            num_blocks % cand == 0):
                yield cand
-       
+  
+  # #  The number of num_blocks does not have to be exactly divisible by pp 
+  # @staticmethod
+  # def get_all_pipeline_parallelisms(num_procs, tensor_par, num_blocks):
+  #   assert num_procs % tensor_par == 0
+  #   left_procs = num_procs // tensor_par
+  #   max_pp = min(left_procs, num_blocks) 
+  #   for cand in Llm._factors(max_pp):
+  #     if (left_procs % cand == 0): 
+  #       yield cand
+        
   #  Special Case for strong scaling
   @staticmethod
   def get_pipeline_parallelism(num_procs, tensor_par, num_blocks):
@@ -343,7 +332,7 @@ class Llm:
     #   f'The total '
     left_procs = num_procs // (tensor_par * pipeline_par)
     max_dp = min(batch_size, left_procs)
-    assert batch_size % max_dp == 0, f'batch size:{batch_size}, data_par: {max_dp}'
+    assert batch_size % max_dp == 0, f'batch size:{batch_size}, data_par: {data_par}'
     return max_dp
 
   @staticmethod
@@ -379,6 +368,7 @@ class Llm:
       batch_seq = cand * seq_size
       if batch_seq % tensor_par == 0:
         yield cand
+    yield cand
 
   @staticmethod
   def can_redo_ag(tensor_par_comm_type, activation_recompute):
@@ -1571,7 +1561,7 @@ class Llm:
       "MlpBlock_Mlp1_MoE",
       self.sys,
       self.exe._experts_per_par,
-      self._batch_seq_exp * self.exe.k,
+      self._batch_seq_exp * self.exe.k,  # B2 fix: was _batch_seq
       self.app.hidden,
       #  This feedforward will need to be adapted w.r.t tp
       self.app.feedforward // self.exe.expert_slice,
@@ -1638,12 +1628,13 @@ class Llm:
     self._llm_block.append(EXPComm(
       "MlpBlock_All2All_MoE_Expert", 
       self.sys,
-      # Symmetric with RouterBlock_All2All_Expert (same volume, reverse direction).
-      # With SP active, each TP/SP GPU holds batch_seq/SP * k * hidden.
-      pick(self.exe._sequence_par,
-           self._batch_seq * self.exe.k // self.exe.sequence_par * self.app.hidden,
-           self._batch_seq * self.exe.k * self.app.hidden),
+      # This should be the per proc number to communciate
+      # We are sending the Tokens * Hidden size and that Tokens-Expert just
+      # notifies where to send
+      pick(self.exe._sequence_par, self._batch_seq * self.exe.k // self.exe.sequence_par * self.app.hidden, 
+          self._batch_seq * self.exe.k * self.app.hidden),
       self.exe.expert_par_net, 
+      # This is the number of procs involved in the communciation
       self.exe.expert_par, 
       "all2all",
       in_network_reduction=False, needs_recomm=False, activation_reused=False,
@@ -1740,9 +1731,7 @@ class Llm:
       "RouterBlock_All2All_Expert", 
       self.sys,
       # This is the input size of an involving expert processor 
-      # With SP active each GPU holds batch_seq/SP tokens; matches MlpBlock_All2All_MoE_Expert
-      pick(self.exe._sequence_par,
-           self._batch_seq * self.exe.k // self.exe.sequence_par * self.app.hidden,
+      pick(self.exe._sequence_par, self._batch_seq * self.exe.k // self.exe.sequence_par * self.app.hidden, 
            self._batch_seq * self.exe.k * self.app.hidden),
       # The network tier used by expert parallelism
       self.exe.expert_par_net, 
@@ -1756,8 +1745,8 @@ class Llm:
     self._llm_block.append(TPComm(
       "RouterBlock_Gather_ExpertSlice",
       self.sys,
-      # Symmetric conjugate of MlpBlock_Reduce_MoE_ExpertSlice (rs_ag, conjugate=True).
-      # act_size = post-AllGather output = batch_seq/expert_par * k * hidden.
+      # Symmetric conjugate of MlpBlock_Reduce_MoE_ExpertSlice.
+      # act_size = tokens per expert × k × experts_per_par × hidden
       self._batch_seq_exp * self.exe.k * self.exe._experts_per_par * self.app.hidden,
       self.exe.expert_slice_net,
       self.exe.expert_slice,
@@ -1788,9 +1777,9 @@ class Llm:
       # Currently turned off Expert Slice due to new Deepspeed and NeMo benchmark.
       # Only check with MoE 
       # 1. Expert Par * Tensor Par * MoE data Par * Pipeline Par
-      assert self.exe.num_procs >= self.exe.expert_par * self.exe.expert_slice * self.exe.pipeline_par * self.exe.data_par_exp, \
-        f'expert_par: {self.exe.expert_par} * expert_slice: {self.exe.expert_slice} * data_par_exp: {self.exe.data_par}\
-        * pipeline_par: {self.exe.pipeline_par} > num_procs: {self.exe.num_procs}'
+      assert self.exe.num_procs == self.exe.expert_par * self.exe.tensor_par * self.exe.pipeline_par * self.exe.data_par_exp, \
+        f'expert_par: {self.exe.expert_par} * tensor_par: {self.exe.tensor_par} * data_par_exp: {self.exe.data_par}\
+        * pipeline_par: {self.exe.pipeline_par} != num_procs: {self.exe.num_procs}'
     
     # Need to check in general
     # 2. Tensor Par * Data Par * Pipeline Par
@@ -1846,12 +1835,16 @@ class Llm:
     #  In MoE, _batch_seq is used before passing to the expert
     # while _batch_seq_exp is used for expert sequence input, which is after doing the all-to-all
     
-    # Tokens distributed to each expert (balanced-load assumption).
-    # We track per-expert tokens before top-k multiplication.
-    
-    self._batch_seq_exp = self.exe.microbatch_size * self.app.seq_size / self.exe.num_experts
+    # Tokens delivered to each expert per pipeline step (balanced-load assumption).
+    # At each step all DP attention replicas simultaneously feed into the EP domain,
+    # so each expert GPU processes tokens from DP/DP_moe replicas at once.
+    # _batch_seq_exp = mbs * seq * (DP / DP_moe) / num_experts
+    #                = mbs * seq * (EP * ES / TP)  / num_experts
+    self._batch_seq_exp = (self.exe.microbatch_size * self.app.seq_size *
+                           self.exe.data_par / self.exe.data_par_exp /
+                           self.exe.num_experts)
+
     self._batch_seq = self.exe.microbatch_size * self.app.seq_size
-    
     self._activation_size = self._batch_seq * self.app.hidden
     self._batch_seq_par = self._batch_seq // self.exe.tensor_par
     
@@ -2167,10 +2160,10 @@ class Llm:
         layer.get_required_bandwidth("fw", baseblock=False))
       if self.exe.training:
         if layer.get_recompute_flag():
-          self._block_re_flops += layer.get_fw_flops()
-          self._block_re_flops_time += layer.compute_flops_time("fw")
-          self._block_re_mem_accessed += layer.get_fw_mem_accessed()
-          self._block_re_mem_time += layer.compute_mem_time("fw")
+          self._block_re_flops += self._block_fw_flops
+          self._block_re_flops_time += self._block_fw_flops_time
+          self._block_re_mem_accessed += self._block_fw_mem_accessed
+          self._block_re_mem_time += self._block_fw_mem_time
           self._block_re_time += layer.compute_processing_time("fw")
         if layer.get_recomm_flag():
           if ("All2All" in layer.name):
@@ -2877,8 +2870,6 @@ class Llm:
     # Combine DP + DP_exp into a single DP load for overlap analysis.
     # Block-level _block_dp_exp_size/_time are preserved in stats for visibility,
     # but the overlap logic uses the combined values.
-    self._dp_exp_comm_time_link = self._blocks_per_proc * self._block_dp_exp_time
-    self._dp_exp_comm_time_exposed = self._dp_exp_comm_time_link
     self._block_dp_size += self._block_dp_exp_size
     self._block_dp_time += self._block_dp_exp_time
 
@@ -3404,27 +3395,20 @@ class Llm:
     return time
 
   def get_useful_flops(self):
-    # FW (and BW if training) flops scale with both blocks_per_proc and
-    # num_microbatches because each microbatch does a full fwd/bwd pass.
-    fw_bw_flops = sum(
+    total_flops = sum(
       [block.get_fw_flops() for block in self._llm_block])
     if self.exe.training:
-      fw_bw_flops += sum(
-        [block.get_agrad_flops() + block.get_wgrad_flops()
-         for block in self._llm_block])
-    total_flops = self._blocks_per_proc * self.exe._num_microbatches * fw_bw_flops
-    # Optimizer step is performed once per global batch (not per microbatch),
-    # so it only scales with blocks_per_proc.
-    if self.exe.training:
-      optim_flops = sum(
-        [block.get_optim_step_flops() for block in self._llm_block])
-      total_flops += self._blocks_per_proc * optim_flops
+      total_flops += sum(
+        [block.get_agrad_flops() + block.get_wgrad_flops() + \
+          block.get_optim_step_flops() for block in self._llm_block])
     return total_flops
 
   def get_compute_efficiency(self):
+    total_flops = self.get_useful_flops()
     compute_time = self.get_fw_time() + self.get_bw_time() + \
       self.get_optim_step_time()
-    perfect_time = self.get_useful_flops() / self.sys.matrix.flops(self.exe.datatype)
+    perfect_time = self._blocks_per_proc * self.exe._num_microbatches * \
+      total_flops / self.sys.matrix.flops(self.exe.datatype)
     return perfect_time / compute_time
 
   def get_system_efficiency(self):
@@ -3433,7 +3417,9 @@ class Llm:
     return compute_time / self.get_total_time()
 
   def get_total_efficiency(self):
-    perfect_time = self.get_useful_flops() / self.sys.matrix.flops(self.exe.datatype)
+    total_flops = self.get_useful_flops()
+    perfect_time = self._blocks_per_proc * self.exe._num_microbatches * \
+      total_flops / self.sys.matrix.flops(self.exe.datatype)
     return perfect_time / self.get_total_time()
 
   def get_weight_space_min(self):
@@ -3480,8 +3466,6 @@ class Llm:
         return 0
       else:
         return self._block_act_checkpoint_size * 2
-    else:
-      return 0
 
   def get_act_checkpoint_size(self):
     if self.exe.training:

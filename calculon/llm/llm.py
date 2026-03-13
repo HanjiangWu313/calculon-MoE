@@ -1561,7 +1561,7 @@ class Llm:
       "MlpBlock_Mlp1_MoE",
       self.sys,
       self.exe._experts_per_par,
-      self._batch_seq * self.exe.k,
+      self._batch_seq_exp * self.exe.k,  # B2 fix: was _batch_seq
       self.app.hidden,
       #  This feedforward will need to be adapted w.r.t tp
       self.app.feedforward // self.exe.expert_slice,
@@ -1579,7 +1579,7 @@ class Llm:
       "MlpBlock_GeLU_MoE",
       self.sys,
       self.exe._experts_per_par,
-      self._batch_seq * self.exe.k,
+      self._batch_seq_exp * self.exe.k,
       # Apply GeLU on each expert and its slice (es > 1) of parameters 
       self.app.feedforward  // self.exe.expert_slice,
       needs_recompute=recompute_flag,
@@ -1604,7 +1604,7 @@ class Llm:
       # Similar as above
       # For All reduce across ES, it should be all the experts' tokens
       self._batch_seq_exp * self.exe.k * self.exe._experts_per_par * self.app.hidden,
-      self.exe.expert_par_net,
+      self.exe.expert_slice_net,
       # This is now updated to ES
       self.exe.expert_slice,
       # We only compute flops/mem analyzing this layers, comm analyzed later
@@ -1745,8 +1745,9 @@ class Llm:
     self._llm_block.append(TPComm(
       "RouterBlock_Gather_ExpertSlice",
       self.sys,
-      # In here the activation is the total amount across the es
-      self._batch_seq * self.app.hidden * self.exe.k * self.exe.expert_slice,
+      # Symmetric conjugate of MlpBlock_Reduce_MoE_ExpertSlice.
+      # act_size = tokens per expert × k × experts_per_par × hidden
+      self._batch_seq_exp * self.exe.k * self.exe._experts_per_par * self.app.hidden,
       self.exe.expert_slice_net,
       self.exe.expert_slice,
       tensor_par_comm_type="rs_ag",
@@ -1834,9 +1835,14 @@ class Llm:
     #  In MoE, _batch_seq is used before passing to the expert
     # while _batch_seq_exp is used for expert sequence input, which is after doing the all-to-all
     
-    # The batch_seq distributed to each expert
-    # This is incorrect because 
-    self._batch_seq_exp = self.exe.microbatch_size * self.app.seq_size 
+    # Tokens delivered to each expert per pipeline step (balanced-load assumption).
+    # At each step all DP attention replicas simultaneously feed into the EP domain,
+    # so each expert GPU processes tokens from DP/DP_moe replicas at once.
+    # _batch_seq_exp = mbs * seq * (DP / DP_moe) / num_experts
+    #                = mbs * seq * (EP * ES / TP)  / num_experts
+    self._batch_seq_exp = (self.exe.microbatch_size * self.app.seq_size *
+                           self.exe.data_par / self.exe.data_par_exp /
+                           self.exe.num_experts)
 
     self._batch_seq = self.exe.microbatch_size * self.app.seq_size
     self._activation_size = self._batch_seq * self.app.hidden

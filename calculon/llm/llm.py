@@ -1549,51 +1549,43 @@ class Llm:
         activation_reused=True))
   
   """
-     Adapt the MLP block to expert parallel
+    Adapt the MLP block to expert parallel
     Assumption: We see that all the experts will receive the 
                 same amount of tokens (no load imbalance)
   """
   def _build_mlp_block_MoE(self):
     recompute_flag = self.exe.activation_recompute == "full"
-    recompute_ag_flag = recompute_flag or self.exe.seq_par_ag_redo
     
     self._llm_block.append(Linear_MoE(
       "MlpBlock_Mlp1_MoE",
       self.sys,
       self.exe._experts_per_par,
-      self._batch_seq * self.exe.k,
+      # Gather_ExpertSlice (AllGather) restores the full token count before the linear
+      self._batch_seq * self.exe.k // self.exe._experts_per_par,
       self.app.hidden,
-      #  This feedforward will need to be adapted w.r.t tp
-      self.app.feedforward // self.exe.expert_slice,
+      self.app.feedforward * 2 // self.exe.expert_slice,
       needs_recompute=recompute_flag,
-      # With seq_par, we use activations from Comm layers to reflect that
-      # they're split, otherwise we keep full size activations
-      
-      # TODO: Previously, it is for all-gather, but now it should be if we need all-to-all
       # According to the https://www.usenix.org/system/files/atc23-li-jiamin.pdf, all-to-all is expensive.
       # So, we put True here first and we don't do all-to-all again.
       activation_stored=True))
     
-    # GeLU is the common operator in here
+    # SwiGLU is the common operator in here
     self._llm_block.append(SwiGLU(
-      "MlpBlock_GeLU_MoE",
+      "MlpBlock_SwiGLU_MoE",
       self.sys,
       self.exe._experts_per_par,
-      self._batch_seq * self.exe.k,
-      # Apply GeLU on each expert and its slice (es > 1) of parameters 
+      self._batch_seq * self.exe.k // self.exe._experts_per_par,
       self.app.feedforward  // self.exe.expert_slice,
       needs_recompute=recompute_flag,
       fused=self.exe.fused_activation))
     
     # In MoE, this is AR across the slices just like a normal TP
-    # The MoE TPComm is similar to the AR in TPComm
-    # TODO: Now, it always turns on the overlapping when no TP, but will change it later
-    # if self.exe.tensor_par == 1 and self.exe.expert_par > 1:
+    # The MoE-ES Comm is similar to the AR in TPComm
     self._llm_block.append(Linear_MoE(
       "MlpBlock_Mlp2_MoE",
       self.sys,
       self.exe._experts_per_par,
-      self._batch_seq_exp  * self.exe.k,
+      self._batch_seq_exp  * self.exe.k // self.exe._experts_per_par,
       self.app.feedforward // self.exe.expert_slice,
       self.app.hidden,
       needs_recompute=recompute_flag))
@@ -1603,8 +1595,8 @@ class Llm:
       self.sys,
       # Similar as above
       # For All reduce across ES, it should be all the experts' tokens
-      self._batch_seq_exp * self.exe.k * self.exe._experts_per_par * self.app.hidden,
-      self.exe.expert_par_net,
+      self._batch_seq_exp * self.exe.k * self.app.hidden,
+      self.exe.expert_slice_net,
       # This is now updated to ES
       self.exe.expert_slice,
       # We only compute flops/mem analyzing this layers, comm analyzed later
@@ -1643,8 +1635,13 @@ class Llm:
     self._llm_block.append(ElementWise(
         "MlpBlock_MoE_Add",
         self.sys,
-        self._batch_seq // self.exe.sequence_par * self.app.hidden,
-        self._batch_seq // self.exe.sequence_par * self.app.hidden,
+        # Match RouterBlock_Fork shape: sharded by sequence_par only when SP is on.
+        pick(self.exe._sequence_par,
+             self._batch_seq // self.exe.sequence_par * self.app.hidden,
+             self._batch_seq * self.app.hidden),
+        pick(self.exe._sequence_par,
+             self._batch_seq // self.exe.sequence_par * self.app.hidden,
+             self._batch_seq * self.app.hidden),
         needs_recompute=recompute_flag,
         # Activation is stored in Fork instead
         activation_stored=False,
@@ -1745,8 +1742,10 @@ class Llm:
     self._llm_block.append(TPComm(
       "RouterBlock_Gather_ExpertSlice",
       self.sys,
-      # In here the activation is the total amount across the es
-      self._batch_seq * self.app.hidden * self.exe.k * self.exe.expert_slice,
+      # TPComm convention: act_size is the full post-gather per-rank tensor.
+      # AllGather across expert_slice restores the full (tokens * k * hidden).
+      # The pre-gather shard (/expert_slice) is recovered internally via act_size/num_peers.
+      self._batch_seq * self.exe.k * self.app.hidden,
       self.exe.expert_slice_net,
       self.exe.expert_slice,
       tensor_par_comm_type="rs_ag",

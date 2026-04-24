@@ -12,7 +12,7 @@ $HOME/miniconda3/bin/conda init bash
 ``` sh
 conda env create -f environment.yml --name calculon-moe
 conda activate calculon-moe
-Inside calculon-MoE folder, do:
+# Inside calculon-MoE folder, do:
 make
 ```
 

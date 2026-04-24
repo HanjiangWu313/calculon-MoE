@@ -63,10 +63,14 @@ class Llm:
         'expert_slice_net', 'datatype', 'fused_activation', 'attention_type', 'activation_recompute',
         'pipeline_interleaving', 'optimizer_sharding', 'tensor_par_comm_type',
         'tensor_par_overlap', 'seq_par_ag_redo', 'data_par_overlap',
-        'weight_offload', 'activations_offload', 'optimizer_offload', 'training','model_MoE')
+        'weight_offload', 'activations_offload', 'optimizer_offload', 'training','model_MoE',
+        'activation_function')
 
     @staticmethod
     def from_json(cfg):
+      # activation_function for moe is optional (defaults to 'gelu').
+      cfg = {**cfg}
+      cfg.setdefault('activation_function', 'gelu')
       assert set(cfg.keys()) == set(Llm.Execution.fields())
       values = [cfg[field] for field in Llm.Execution.fields()]
       return Llm.Execution(*values)
@@ -79,8 +83,15 @@ class Llm:
                  pipeline_interleaving, optimizer_sharding,
                  tensor_par_comm_type, tensor_par_overlap,
                  seq_par_ag_redo, data_par_overlap, weight_offload,
-                 activations_offload, optimizer_offload, training, model_MoE):
+                 activations_offload, optimizer_offload, training, model_MoE,
+                 activation_function='gelu'):
       
+      # Default activation is GeLU; set to 'silu' (SwiGLU) when requested.
+      if activation_function is None:
+        activation_function = 'gelu'
+      assert activation_function in ['gelu', 'silu'], \
+        f'Unsupported activation_function: {activation_function}'
+      self.activation_function = activation_function
       self.training = training
       self.use_MoE = model_MoE
       self.num_procs = num_procs
@@ -203,7 +214,8 @@ class Llm:
         self.expert_slice_net, self.datatype, self.fused_activation, self.attention_type, self.activation_recompute,
         self.pipeline_interleaving, self.optimizer_sharding, self.tensor_par_comm_type,
         self.tensor_par_overlap, self.seq_par_ag_redo, self.data_par_overlap,
-        self.weight_offload, self.activations_offload, self.optimizer_offload, self.training, self.use_MoE
+        self.weight_offload, self.activations_offload, self.optimizer_offload, self.training, self.use_MoE,
+        self.activation_function
       ]
       assert len(keys) == len(values)
       return dict(zip(keys, values))
@@ -1177,7 +1189,7 @@ class Llm:
     self._llm_block.append(Fork(
       "AttnBlock_Fork",
       self.sys,
-      self._seq_par_activation_size_exp,
+      self._seq_par_activation_size,
       # 2 is because one for going directly to the block and another one goes into ElementWise addition later
       2,
       needs_recompute=recompute_flag,
@@ -1186,7 +1198,7 @@ class Llm:
     self._llm_block.append(LayerNorm(
       "AttnBlock_LayerNorm",
       self.sys,
-      self._seq_par_activation_size_exp,
+      self._seq_par_activation_size,
       self.app.hidden,
       needs_recompute=recompute_flag,
       # Activation is stored in Fork instead
@@ -1408,13 +1420,13 @@ class Llm:
     self._llm_block.append(DropOut(
       "AttnBlock_DropOut",
       self.sys,
-      self._seq_par_activation_size_exp,
+      self._seq_par_activation_size,
       needs_recompute=recompute_flag))
     self._llm_block.append(ElementWise(
       "AttnBlock_Residual",
       self.sys,
-      self._seq_par_activation_size_exp,
-      self._seq_par_activation_size_exp,
+      self._seq_par_activation_size,
+      self._seq_par_activation_size,
       needs_recompute=recompute_flag,
       # Activation is stored in Fork instead
       activation_stored=False,
@@ -1555,29 +1567,48 @@ class Llm:
   """
   def _build_mlp_block_MoE(self):
     recompute_flag = self.exe.activation_recompute == "full"
+    recompute_ag_flag = recompute_flag or self.exe.seq_par_ag_redo
     
-    self._llm_block.append(Linear_MoE(
-      "MlpBlock_Mlp1_MoE",
-      self.sys,
-      self.exe._experts_per_par,
-      # Gather_ExpertSlice (AllGather) restores the full token count before the linear
-      self._batch_seq * self.exe.k // self.exe._experts_per_par,
-      self.app.hidden,
-      self.app.feedforward * 2 // self.exe.expert_slice,
-      needs_recompute=recompute_flag,
-      # According to the https://www.usenix.org/system/files/atc23-li-jiamin.pdf, all-to-all is expensive.
-      # So, we put True here first and we don't do all-to-all again.
-      activation_stored=True))
+
     
-    # SwiGLU is the common operator in here
-    self._llm_block.append(SwiGLU(
-      "MlpBlock_SwiGLU_MoE",
-      self.sys,
-      self.exe._experts_per_par,
-      self._batch_seq * self.exe.k // self.exe._experts_per_par,
-      self.app.feedforward  // self.exe.expert_slice,
-      needs_recompute=recompute_flag,
-      fused=self.exe.fused_activation))
+    # Activation: default GeLU, switched to SwiGLU when exe.activation_function == 'silu'.
+    if self.exe.activation_function == 'silu':
+      self._llm_block.append(Linear_MoE(
+        "MlpBlock_Mlp1_MoE",
+        self.sys,
+        self.exe._experts_per_par,
+        # Gather_ExpertSlice (AllGather) restores the full token count before the linear
+        self._batch_seq_exp_par,
+        self.app.hidden,
+        self.app.feedforward * 2 // self.exe.expert_slice,
+        needs_recompute=recompute_flag,
+        activation_stored=True))
+      self._llm_block.append(SwiGLU(
+        "MlpBlock_SwiGLU_MoE",
+        self.sys,
+        self.exe._experts_per_par,
+        self._batch_seq_exp_par,
+        self.app.feedforward  // self.exe.expert_slice,
+        needs_recompute=recompute_flag,
+        fused=self.exe.fused_activation))
+    else:
+      self._llm_block.append(Linear_MoE(
+        "MlpBlock_Mlp1_MoE",
+        self.sys,
+        self.exe._experts_per_par,
+        # Gather_ExpertSlice (AllGather) restores the full token count before the linear
+        self._batch_seq_exp_par,
+        self.app.hidden,
+        self.app.feedforward // self.exe.expert_slice,
+        needs_recompute=recompute_flag,
+        activation_stored=True))
+      self._llm_block.append(GeLU(
+        "MlpBlock_GeLU_MoE",
+        self.sys,
+        self.exe._experts_per_par * self._batch_seq_exp_par *
+          (self.app.feedforward // self.exe.expert_slice),
+        needs_recompute=recompute_flag,
+        fused=self.exe.fused_activation))
     
     # In MoE, this is AR across the slices just like a normal TP
     # The MoE-ES Comm is similar to the AR in TPComm
@@ -1585,7 +1616,7 @@ class Llm:
       "MlpBlock_Mlp2_MoE",
       self.sys,
       self.exe._experts_per_par,
-      self._batch_seq_exp  * self.exe.k // self.exe._experts_per_par,
+      self._batch_seq_exp_par,
       self.app.feedforward // self.exe.expert_slice,
       self.app.hidden,
       needs_recompute=recompute_flag))
@@ -1593,9 +1624,8 @@ class Llm:
     self._llm_block.append(TPComm(
       "MlpBlock_Reduce_MoE_ExpertSlice",
       self.sys,
-      # Similar as above
-      # For All reduce across ES, it should be all the experts' tokens
-      self._batch_seq_exp * self.exe.k * self.app.hidden,
+      # Full per-rank pre-RS tensor: all local experts' tokens in hidden dim.
+      self._batch_seq * self.exe.k * self.app.hidden,
       self.exe.expert_slice_net,
       # This is now updated to ES
       self.exe.expert_slice,
@@ -1605,7 +1635,7 @@ class Llm:
       tensor_par_comm_type="rs_ag",
       conjugate=True,
       in_network_reduction=self.exe.in_network_reduction,
-      needs_recomm=recompute_flag,
+      needs_recomm=recompute_ag_flag,
       activation_stored=False))
     
     # TODO: In MoE, the overlapping between compute and comm takes place in 
@@ -1614,7 +1644,7 @@ class Llm:
     # self._llm_block.append(DropOut(
     #   "MlpBlock_DropOut_MoE",
     #   self.sys,
-    #   self._batch_seq_exp * self.exe._experts_per_par * self.app.hidden,
+    #   self._batch_seq * self.exe.k * self.app.hidden,
     #   needs_recompute=recompute_flag))
     # MoE requires all-to-all after mlp
     self._llm_block.append(EXPComm(
@@ -1735,6 +1765,8 @@ class Llm:
       # This is the number of procs involved in the communciation
       self.exe.expert_par, 
       "all2all",
+      # According to the https://www.usenix.org/system/files/atc23-li-jiamin.pdf, all-to-all is really expensive
+      # and do not do recomm in general
       in_network_reduction=False, needs_recomm=False, activation_reused=False,
       activation_stored=False, output_stored=False))
     
@@ -1829,36 +1861,27 @@ class Llm:
     self._edgeblocks_per_chunk = 1
 
     # Build model during the compilation step
-    
-    #  In MoE, _batch_seq is used before passing to the expert
-    # while _batch_seq_exp is used for expert sequence input, which is after doing the all-to-all
-    
-    # The batch_seq distributed to each expert
-    # This is incorrect because 
-    self._batch_seq_exp = self.exe.microbatch_size * self.app.seq_size 
 
     self._batch_seq = self.exe.microbatch_size * self.app.seq_size
     self._activation_size = self._batch_seq * self.app.hidden
     self._batch_seq_par = self._batch_seq // self.exe.tensor_par
-    
-    #  In MoE case, the activation size should be reduced by the sp 
-    # if self.exe.use_MoE:
-    #   self._activation_size = self._activation_size // self.exe.sequence_par
-      
 
-    # Another way to do is to set the TP outside as the number 
+    # Per-expert token count on this Expert Parallel (EP) rank with the topk selection, 
+    # used as the `batch_seq` arg for Linear_MoE / SwiGLU inside the MoE MLP block.
+    if self.exe.use_MoE:
+      self._batch_seq_exp_par = \
+        self._batch_seq * self.exe.k // self.exe._experts_per_par
+
+    # Another way to do is to set the TP outside as the number
     # This should be applied to attention block
     self._seq_par_exp = self.exe.num_experts * self.exe.tensor_par
-    
-    
-    self._seq_par_activation_size_exp = self._activation_size // self.exe.sequence_par
-    
+
     #  The sequence parallelism under the context of TP is different from the one within MoE.
     if self.exe._sequence_par or self.exe._pipeline_par_rs_ag:
       assert self._batch_seq % self.exe.tensor_par == 0, (
         f"We should split batch_seq={self._batch_seq} between"
         f" {self.exe.tensor_par} TP partitions evenly")
-    self._seq_par_activation_size = self._batch_seq_par * self.app.hidden 
+    self._seq_par_activation_size = self._batch_seq_par * self.app.hidden
     if (self.exe.use_MoE):
       #  Build with MoE
       self._build_attn_block_MoE()
@@ -1990,7 +2013,7 @@ class Llm:
       if self.exe.use_MoE:
         # This should include the attention checkpoint size I believe.
         self._block_act_checkpoint_size = \
-        self._seq_par_activation_size_exp * self._bytes_per_element
+        self._seq_par_activation_size * self._bytes_per_element
     else:
       self._block_act_checkpoint_size = 0
 
@@ -3426,23 +3449,9 @@ class Llm:
     if not self.exe.use_MoE:  
       return self._num_weight_params * self.exe.tensor_par * self.exe.pipeline_par
     else:
-      # For MoE separate attn and mlp
-      # _attn_weight_params and _mlp_weight_params are per-block, per-GPU values.
-      # Attention params are sharded by TP only.
       attn_weight_params = self._attn_weight_params * self._blocks_per_proc * self.exe.pipeline_par * self.exe.tensor_par 
-      # _mlp_weight_params includes both expert-local params (Linear_MoE)
-      # and shared params (LayerNorm, router ExpertProjection).
-      # Expert-local params already have experts_per_par baked in and are
-      # sharded by expert_slice, so scale by ep * es to get global count.
-      # Shared params are replicated across EP and need TP scaling only.
-      expert_mlp_params_per_block = 2 * self.exe._experts_per_par * \
-        self.app.hidden * self.app.feedforward // self.exe.expert_slice
-      shared_mlp_params_per_block = self._mlp_weight_params - expert_mlp_params_per_block
-      expert_mlp_params = expert_mlp_params_per_block * self._blocks_per_proc * \
-        self.exe.pipeline_par * self.exe.expert_par * self.exe.expert_slice
-      shared_mlp_params = shared_mlp_params_per_block * self._blocks_per_proc * \
-        self.exe.pipeline_par * self.exe.tensor_par
-      return attn_weight_params + expert_mlp_params + shared_mlp_params
+      mlp_weight_params = self._mlp_weight_params * self._blocks_per_proc * self.exe.pipeline_par * self.exe.num_experts * self.exe.expert_slice // self.exe._experts_per_par 
+      return attn_weight_params + mlp_weight_params
     
   def get_act_space_min(self):
     if self.exe.activation_recompute != 'full':

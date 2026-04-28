@@ -108,6 +108,9 @@ class Llm:
       self.sequence_par = self.tensor_par
       self.expert_slice = expert_slice
       assert self.expert_slice > 0
+      # Sequence-parallel-style sharding inside the MoE MLP block is governed by
+      # expert_slice (post-RS the token dim is split by ES), not tensor_par.
+      self.sequence_par_es = self.expert_slice
       self.data_par_exp = data_par_exp
       assert self.data_par_exp > 0
 
@@ -1638,8 +1641,6 @@ class Llm:
       needs_recomm=recompute_ag_flag,
       activation_stored=False))
     
-    # TODO: In MoE, the overlapping between compute and comm takes place in 
-    # between down projection + all2all 
   
     # self._llm_block.append(DropOut(
     #   "MlpBlock_DropOut_MoE",
@@ -1650,10 +1651,9 @@ class Llm:
     self._llm_block.append(EXPComm(
       "MlpBlock_All2All_MoE_Expert", 
       self.sys,
-      # This should be the per proc number to communciate
-      # We are sending the Tokens * Hidden size and that Tokens-Expert just
-      # notifies where to send
-      pick(self.exe._sequence_par, self._batch_seq * self.exe.k // self.exe.sequence_par * self.app.hidden, 
+      # Once sequence parallel is applied, it will be used for RS in the expert parallel as well, but the 
+      # size of sequence_par_es is equal to expert_slice
+      pick(self.exe._sequence_par, self._batch_seq * self.exe.k // self.exe.sequence_par_es * self.app.hidden, 
           self._batch_seq * self.exe.k * self.app.hidden),
       self.exe.expert_par_net, 
       # This is the number of procs involved in the communciation

@@ -347,7 +347,7 @@ class Llm:
     #   f'The total '
     left_procs = num_procs // (tensor_par * pipeline_par)
     max_dp = min(batch_size, left_procs)
-    assert batch_size % max_dp == 0, f'batch size:{batch_size}, data_par: {data_par}'
+    assert batch_size % max_dp == 0, f'batch size:{batch_size}, data_par: {max_dp}'
     return max_dp
 
   @staticmethod
@@ -2176,10 +2176,10 @@ class Llm:
         layer.get_required_bandwidth("fw", baseblock=False))
       if self.exe.training:
         if layer.get_recompute_flag():
-          self._block_re_flops += self._block_fw_flops
-          self._block_re_flops_time += self._block_fw_flops_time
-          self._block_re_mem_accessed += self._block_fw_mem_accessed
-          self._block_re_mem_time += self._block_fw_mem_time
+          self._block_re_flops += layer.get_fw_flops()
+          self._block_re_flops_time += layer.compute_flops_time("fw")
+          self._block_re_mem_accessed += layer.get_fw_mem_accessed()
+          self._block_re_mem_time += layer.compute_mem_time("fw")
           self._block_re_time += layer.compute_processing_time("fw")
         if layer.get_recomm_flag():
           if ("All2All" in layer.name):
@@ -3031,6 +3031,10 @@ class Llm:
       self._dp_comm_time_link = 0
       self._dp_bw_overlap_req_chunk = 0
       self._dp_bw_overlap_req_tail = 0
+
+    # DP_exp raw link time (folded into combined DP overlap above; never exposed separately)
+    self._dp_exp_comm_time_link = self._blocks_per_proc * self._block_dp_exp_time
+    self._dp_exp_comm_time_exposed = 0
 
     self.log.debug('Chunk FW time: %.3e', chunk_fw_time)
     self.log.debug('Chunk BW time: %.3e', chunk_bw_time)

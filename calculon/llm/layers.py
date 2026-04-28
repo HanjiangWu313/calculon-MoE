@@ -124,12 +124,12 @@ class Layer:
       human_format(self.get_fw_mem_accessed(), 'bytes'))
     stats += " FW AI: {0:.3f}\n".format(self.get_fw_arithmetic_intensity())
     stats += "{0} BW Adrad flops, {1} BW Agrad bytes accessed,".format(
-      human_format(self.get_agrard_flops(), 'flops'),
+      human_format(self.get_agrad_flops(), 'flops'),
       human_format(self.get_agrad_mem_accessed(), 'bytes'))
     stats += " BW Agrad AI: {0:.3f}\n".format(
       self.get_agrad_arithmetic_intensity())
     stats += "{0} BW Wdrad flops, {1} BW Wgrad bytes accessed,".format(
-      human_format(self.get_wgrard_flops(), 'flops'),
+      human_format(self.get_wgrad_flops(), 'flops'),
       human_format(self.get_wgrad_mem_accessed(), 'bytes'))
     stats += " BW Wgrad AI: {0:.3f}\n".format(
       self.get_wgrad_arithmetic_intensity())

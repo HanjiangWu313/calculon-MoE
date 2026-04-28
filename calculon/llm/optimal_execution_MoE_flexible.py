@@ -27,16 +27,16 @@ from calculon.util import pick, arg_true_false_all
 from calculon.llm import *
 
 
-class OptimalExecution_MoE(calculon.CommandLine):
-  NAME = 'llm-optimal-execution-moe'
-  ALIASES = ['loe-moe']
+class OptimalExecution_MoE_Flexible(calculon.CommandLine):
+  NAME = 'llm-optimal-execution-moe-flexible'
+  ALIASES = ['loe-moe-flex']
 
   @staticmethod
   def create_parser(subparser):
     sp = subparser.add_parser(
-      OptimalExecution_MoE.NAME, aliases=OptimalExecution_MoE.ALIASES,
+      OptimalExecution_MoE_Flexible.NAME, aliases=OptimalExecution_MoE_Flexible.ALIASES,
       help='run a search to find the optimal llm execution')
-    sp.set_defaults(func=OptimalExecution_MoE.run_command)
+    sp.set_defaults(func=OptimalExecution_MoE_Flexible.run_command)
     sp.add_argument('-d', '--debug', action='store_true',
                     help='Loop over executions, don\'t run them')
     sp.add_argument('application', type=str,
@@ -88,14 +88,14 @@ class OptimalExecution_MoE(calculon.CommandLine):
 
     for ep in Llm.get_all_expert_parallelisms_flexible(num_experts, args.num_procs):
       remaining_procs_after_ep = args.num_procs//ep   
-      for pp in Llm.get_all_pipeline_parallelisms(remaining_procs_after_ep, app.num_blocks):
-          if (app.num_blocks % pp!= 0 and args.num_procs % pp!=0):
+      for pp in Llm.get_all_pipeline_parallelisms(remaining_procs_after_ep, 1, app.num_blocks):
+          if (app.num_blocks % pp!= 0 or args.num_procs % pp!=0):
               continue
           es_list = []
           tp_list = []
           remaining_procs_after_ep_pp = remaining_procs_after_ep//pp
           
-          for es in Llm.get_all_expert_slice_parallelisms(remaining_procs_after_ep_pp, app.hidden):
+          for es in Llm.get_all_expert_slice_parallelisms(1, remaining_procs_after_ep_pp, app.hidden):
             if( args.num_procs%(ep*es*pp)!=0) :
                     continue
             es_list.append(es)
@@ -104,8 +104,6 @@ class OptimalExecution_MoE(calculon.CommandLine):
             if(args.num_procs%(tp*pp)!=0) :
                 continue
             tp_list.append(tp)
-            
-            
           for es in  es_list:
               for tp in tp_list:
                 #making pp uniform for both MOE/non-MOE!
@@ -144,7 +142,7 @@ class OptimalExecution_MoE(calculon.CommandLine):
     # Runs parallel searches
     start_time = datetime.datetime.now()
     with mp.Pool(args.cpus) as pool:
-      searches = pool.starmap(OptimalExecution_MoE.search, params, chunksize=20)
+      searches = pool.starmap(OptimalExecution_MoE_Flexible.search, params, chunksize=20)
     end_time = datetime.datetime.now()
     
     # Combines parallel search result into one data structure
@@ -153,7 +151,7 @@ class OptimalExecution_MoE(calculon.CommandLine):
     good_exe_count = 0
     bad_exe_count = 0
     for cbest, ec, gec, bec, tp, pp in searches:
-      best = OptimalExecution_MoE.update_list(best, cbest, args.top_n)
+      best = OptimalExecution_MoE_Flexible.update_list(best, cbest, args.top_n)
       exe_count += ec
       good_exe_count += gec
       bad_exe_count += bec
@@ -307,7 +305,7 @@ class OptimalExecution_MoE(calculon.CommandLine):
                                     stats = model.get_stats_json(layers)
                                     good_exe_count += 1
                                     curr = (stats['sample_rate'], exe_json, stats)
-                                    best = OptimalExecution_MoE.update_list(best, curr,
+                                    best = OptimalExecution_MoE_Flexible.update_list(best, curr,
                                                                         top_n)
                                     # if(ep == 8 and ep == 8 and es == 1 and tp == 8 and dp == 512 and ppint == 5):
                                     # print(f'best sample rate is : {best[0][0]}')
@@ -331,4 +329,4 @@ class OptimalExecution_MoE(calculon.CommandLine):
     return current[:quantity]
 
 
-calculon.CommandLine.register(OptimalExecution_MoE)
+calculon.CommandLine.register(OptimalExecution_MoE_Flexible)

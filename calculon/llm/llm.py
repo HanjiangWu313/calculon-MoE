@@ -292,15 +292,22 @@ class Llm:
         
   @staticmethod
   def get_all_expert_parallelisms(num_experts, num_procs):
-    max_ep = min(num_experts, num_procs)
-    
-    # for cand in  Llm._factors(max_ep):
-    #   # return a valid cand for the ep
-    #   # Number of experts must be multiples of expert parallelism
-    #   # ref: https://docs.nvidia.com/nemo-framework/user-guide/latest/nemotoolkit/features/parallelisms.html
-    #   if num_experts % cand == 0:
-    #     yield cand
+    # Legacy behavior: EP is fixed to num_experts (one expert per EP rank).
+    # Used by the legacy MoE search (optimal_execution_MoE.py) which assumes
+    # ES == TP and does not enumerate over EP.
+    assert num_procs % num_experts == 0, \
+      f'num_procs={num_procs} must be divisible by num_experts={num_experts}'
     yield num_experts
+
+  @staticmethod
+  def get_all_expert_parallelisms_flexible(num_experts, num_procs):
+    # Flexible enumeration: EP must divide both num_experts (each EP rank
+    # holds an integer number of experts) and num_procs (the EP group is a
+    # slice of the process grid). Used by optimal_execution_MoE_flexible.py.
+    max_ep = min(num_experts, num_procs)
+    for cand in Llm._factors(max_ep):
+      if num_experts % cand == 0 and num_procs % cand == 0:
+        yield cand
 
   #  The number of num_blocks does not have to be exactly divisible by pp 
   @staticmethod
@@ -313,15 +320,6 @@ class Llm:
            num_blocks % cand == 0):
                yield cand
   
-  # #  The number of num_blocks does not have to be exactly divisible by pp 
-  # @staticmethod
-  # def get_all_pipeline_parallelisms(num_procs, tensor_par, num_blocks):
-  #   assert num_procs % tensor_par == 0
-  #   left_procs = num_procs // tensor_par
-  #   max_pp = min(left_procs, num_blocks) 
-  #   for cand in Llm._factors(max_pp):
-  #     if (left_procs % cand == 0): 
-  #       yield cand
         
   #  Special Case for strong scaling
   @staticmethod
@@ -356,12 +354,6 @@ class Llm:
       f'np={num_procs} tp={tensor_par} pp={pipeline_par}'
     return num_procs // (tensor_par * pipeline_par)
 
-  # # TODO: Check this
-  # @staticmethod
-  # def get_data_parallelism(num_procs, tensor_par, pipeline_par):
-  #   assert num_procs % (tensor_par * pipeline_par) == 0, \
-  #     f'np={num_procs} tp={tensor_par} pp={pipeline_par}'
-  #   return num_procs // (tensor_par * pipeline_par)
   
   @staticmethod
   def get_valid_pipeline_interleavings(num_blocks, pipeline_par):
@@ -1651,9 +1643,12 @@ class Llm:
     self._llm_block.append(EXPComm(
       "MlpBlock_All2All_MoE_Expert", 
       self.sys,
-      # Once sequence parallel is applied, it will be used for RS in the expert parallel as well, but the 
-      # size of sequence_par_es is equal to expert_slice
-      pick(self.exe._sequence_par, self._batch_seq * self.exe.k // self.exe.sequence_par_es * self.app.hidden, 
+      # The preceding MlpBlock_Reduce_MoE_ExpertSlice is a hard-coded RS over
+      # expert_slice, so the All2All input is always sharded by sequence_par_es
+      # (which equals expert_slice; == 1 when ES is disabled, so this is a
+      # no-op in that case). Gate on sequence_par_es so that ES sharding is
+      # honored independently of TP's _sequence_par flag.
+      pick(self.exe.sequence_par_es, self._batch_seq * self.exe.k // self.exe.sequence_par_es * self.app.hidden,
           self._batch_seq * self.exe.k * self.app.hidden),
       self.exe.expert_par_net, 
       # This is the number of procs involved in the communciation
@@ -1806,9 +1801,9 @@ class Llm:
       # MoE: Parallelism combinations
       # Currently turned off Expert Slice due to new Deepspeed and NeMo benchmark.
       # Only check with MoE 
-      # 1. Expert Par * Tensor Par * MoE data Par * Pipeline Par
-      assert self.exe.num_procs == self.exe.expert_par * self.exe.tensor_par * self.exe.pipeline_par * self.exe.data_par_exp, \
-        f'expert_par: {self.exe.expert_par} * tensor_par: {self.exe.tensor_par} * data_par_exp: {self.exe.data_par}\
+      # 1. Expert Par * Expert Slice * MoE data Par * Pipeline Par
+      assert self.exe.num_procs == self.exe.expert_par * self.exe.expert_slice * self.exe.pipeline_par * self.exe.data_par_exp, \
+        f'expert_par: {self.exe.expert_par} * expert_slice: {self.exe.expert_slice} * data_par_exp: {self.exe.data_par_exp}\
         * pipeline_par: {self.exe.pipeline_par} != num_procs: {self.exe.num_procs}'
     
     # Need to check in general

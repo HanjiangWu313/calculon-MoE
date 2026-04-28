@@ -94,6 +94,7 @@ class OptimalExecution_MoE(calculon.CommandLine):
       for tp in Llm.get_all_tensor_parallelisms(
         args.num_procs // ep, app.hidden, app.attn_heads):
         # Hidden size must be multiples of tp
+        # Set es = tp due to legacy fix in the NeMo
         es = tp
         if (not (app.hidden % tp == 0)):
           continue

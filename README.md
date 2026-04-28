@@ -48,6 +48,14 @@ Run a system execution optimizer for searching the space for GPT-like 1.8T Trans
 PYTHONPATH=. ./bin/calculon llm-optimal-execution-moe models/gpt-1.8T.json 4096 2048 float16 systems/H100_80g_sxm.json output_gpt-1.8T_4096_2048.json -moe 16
 ```
 
+### Running MoE LLM optimal search with flexible expert/expert-slice parallelism (calculon-MoE)
+
+Run a system execution optimizer that flexibly searches all combinations of EP, ES and TP without constraints. The following example searches the parallelization technique for 4096 H100 GPUs, and the Batch Size is 2048, which is specified internally in the calculon/llm/optimal_execution_MoE_flexible file:
+
+``` sh
+PYTHONPATH=. ./bin/calculon llm-optimal-execution-moe-flexible models/gpt-1.8T.json 4096 2048 float16 systems/H100_80g_sxm.json output_gpt-1.8T_4096_2048_flex.json -moe 16
+```
+
 ## Publications
 
 * Scaling Intelligence: Designing Data Centers for Next-Gen Language Models \

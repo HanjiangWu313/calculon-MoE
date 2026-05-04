@@ -104,9 +104,8 @@ class Llm:
       self.tensor_par_net = tensor_par_net
       self.pipeline_par_net = pipeline_par_net
       self.data_par_net = data_par_net
-      self.expert_par_net =  expert_par_net
-      self.expert_slice_net = expert_slice_net
       self.expert_par_net = expert_par_net
+      self.expert_slice_net = expert_slice_net
       self.data_par_exp_net = data_par_exp_net
       #  TopK selection
       # TODO: Maybe we can put the k into execution
@@ -184,12 +183,15 @@ class Llm:
           self.num_experts = num_experts
       else:
           self.num_experts = 1  # Set the default value you want
+
+      assert 0 < self.k <= self.num_experts, \
+        f'top_k_experts={self.k} must be in [1, num_experts={self.num_experts}]'
           
       #  This is the factor we needed to handle if the number of 
       # experts to run is more than the resources that we have
       # Can we have more experts smaller expert_par??
-      assert num_experts >= expert_par, "One expert cannot be partitioned across multiple gpus"
-      assert num_experts % expert_par == 0, "The number of experts should be multiples of expert parallelism"
+      assert self.num_experts >= self.expert_par, "One expert cannot be partitioned across multiple gpus"
+      assert self.num_experts % self.expert_par == 0, "The number of experts should be multiples of expert parallelism"
       self._experts_per_par = self.num_experts // self.expert_par
   
 
@@ -278,14 +280,12 @@ class Llm:
   @staticmethod
   def get_all_expert_parallelisms(num_experts, num_procs):
     max_ep = min(num_experts, num_procs)
-    
-    # for cand in  Llm._factors(max_ep):
-    #   # return a valid cand for the ep
-    #   # Number of experts must be multiples of expert parallelism
-    #   # ref: https://docs.nvidia.com/nemo-framework/user-guide/latest/nemotoolkit/features/parallelisms.html
-    #   if num_experts % cand == 0:
-    #     yield cand
-    yield num_experts
+
+    # Number of experts must be multiples of expert parallelism.
+    # Also ensure EP can map onto available processors.
+    for cand in Llm._factors(max_ep):
+      if num_experts % cand == 0 and num_procs % cand == 0:
+        yield cand
 
   #  The number of num_blocks does not have to be exactly divisible by pp 
   @staticmethod
@@ -331,9 +331,9 @@ class Llm:
     # assert num_procs // (tensor_par * pipeline_par) == num_procs // (tensor_par * pipeline_par), \
     #   f'The total '
     left_procs = num_procs // (tensor_par * pipeline_par)
-    max_dp = min(batch_size, left_procs)
-    assert batch_size % max_dp == 0, f'batch size:{batch_size}, data_par: {max_dp}'
-    return max_dp
+    valid_dps = [cand for cand in Llm._factors(batch_size) if cand <= left_procs]
+    assert valid_dps, f'No valid data parallelism for batch size:{batch_size}, left_procs:{left_procs}'
+    return max(valid_dps)
 
   @staticmethod
   def get_data_parallelism_original(num_procs, tensor_par, pipeline_par):
@@ -368,7 +368,6 @@ class Llm:
       batch_seq = cand * seq_size
       if batch_seq % tensor_par == 0:
         yield cand
-    yield cand
 
   @staticmethod
   def can_redo_ag(tensor_par_comm_type, activation_recompute):
@@ -1699,8 +1698,10 @@ class Llm:
     self._llm_block.append(SelTopK(
       "RouterBlock_SelectTopK",
       self.sys,
-      pick(self.exe._sequence_par, self._batch_seq // self.exe.sequence_par, 
-           self._batch_seq),
+       # SelTopK expects expert-logit volume: tokens * num_experts.
+       pick(self.exe._sequence_par,
+         self._batch_seq // self.exe.sequence_par * self.exe.num_experts,
+         self._batch_seq * self.exe.num_experts),
       self.exe.num_experts,
       self.exe.k,
       needs_recompute=recompute_flag,
@@ -1840,9 +1841,13 @@ class Llm:
     # so each expert GPU processes tokens from DP/DP_moe replicas at once.
     # _batch_seq_exp = mbs * seq * (DP / DP_moe) / num_experts
     #                = mbs * seq * (EP * ES / TP)  / num_experts
-    self._batch_seq_exp = (self.exe.microbatch_size * self.app.seq_size *
-                           self.exe.data_par / self.exe.data_par_exp /
-                           self.exe.num_experts)
+    numerator = self.exe.microbatch_size * self.app.seq_size * self.exe.data_par
+    denominator = self.exe.data_par_exp * self.exe.num_experts
+    assert denominator > 0
+    assert numerator % denominator == 0, (
+      f"MoE token partition must divide evenly: numerator={numerator}, denominator={denominator}"
+    )
+    self._batch_seq_exp = numerator // denominator
 
     self._batch_seq = self.exe.microbatch_size * self.app.seq_size
     self._activation_size = self._batch_seq * self.app.hidden
@@ -1890,8 +1895,9 @@ class Llm:
 
     assert self.exe.pipeline_par_net < self.sys.num_networks
     assert self.exe.data_par_net < self.sys.num_networks
+    assert self.exe.data_par_exp_net < self.sys.num_networks
     assert self.exe.expert_par_net < self.sys.num_networks
-    # assert self.exe.expert_slice_net < self.sys.num_networks
+    assert self.exe.expert_slice_net < self.sys.num_networks
 
     # Shared by both MoE and nonMoE
     if self.exe.pipeline_par > 1:

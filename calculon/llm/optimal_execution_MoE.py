@@ -68,6 +68,8 @@ class OptimalExecution_MoE(calculon.CommandLine):
                     help='Don\'t allow DP overlap')
     sp.add_argument('-moe', '--moe', type=int, default=16,
                     help='Number of experts')
+    sp.add_argument('--fast-prune', action='store_true',
+            help='Prune search dimensions for faster exploratory runs')
 
   @staticmethod
   def run_command(logger, args):
@@ -91,6 +93,8 @@ class OptimalExecution_MoE(calculon.CommandLine):
     count = 0
 
     for ep in Llm.get_all_expert_parallelisms(num_experts, args.num_procs):
+      if args.fast_prune and ep != num_experts:
+        continue
       for tp in Llm.get_all_tensor_parallelisms(
         args.num_procs // ep, app.hidden, app.attn_heads):
         # Hidden size must be multiples of tp
@@ -121,10 +125,12 @@ class OptimalExecution_MoE(calculon.CommandLine):
           for ppint in Llm.get_valid_pipeline_interleavings(app.num_blocks, pp):
             #print(f'pp: {pp}, ep: {ep}, tp: {tp}, dp: {dp}, dp_exp: {dp_exp}, ppint: {ppint}')
             # attn_only is not supported for now.
-            for activation_recompute in ['none', 'full', 'attn_only']:
-            #for activation_recompute in ['none']:
-                for optimizer_sharding in pick(dp>1, [True, False], [False]):
-                    for tensor_par_comm_type in ['ar', 'p2p_rs_ag', 'rs_ag']:
+            activation_recompute_options = ['none'] if args.fast_prune else ['none', 'full', 'attn_only']
+            for activation_recompute in activation_recompute_options:
+              optimizer_sharding_options = pick(dp>1, [True, False], [False])
+              for optimizer_sharding in optimizer_sharding_options:
+                tensor_par_comm_type_options = ['ar', 'p2p_rs_ag', 'rs_ag']
+                for tensor_par_comm_type in tensor_par_comm_type_options:
                         count += 1
                         params.append(
                         (args, args.debug, args.top_n, args.layers, args.num_procs,
@@ -230,12 +236,15 @@ class OptimalExecution_MoE(calculon.CommandLine):
     if num_experts == 1:
         use_MOE = False
     top_k_experts = min(2, num_experts)
+    data_par_overlap_options = pick(dp>1 and allow_dp_overlap, [True, False], [False])
+    tensor_par_overlap_options = pick(tp>1 and allow_tp_overlap,
+                                       ['none', 'ring', 'pipe'], ['none'])
+    microbatch_sizes = list(Llm.get_valid_microbatch_sizes(app.seq_size, tp, dp, batch_size, pp))
+    net_options = range(num_nets)
     # Reduce the search space to get the best runtime and parallelization only
     for seq_par_ag_redo in pick(False, [True, False], [False]):
-      for data_par_overlap in pick(dp>1 and allow_dp_overlap, [True, False],
-                                   [False]):
-        for tensor_par_overlap in pick(tp>1 and allow_tp_overlap,
-                                       ['none', 'ring', 'pipe'], ['none']):
+      for data_par_overlap in data_par_overlap_options:
+        for tensor_par_overlap in tensor_par_overlap_options:
           for weight_offload in pick(False, [True, False], [False]):
             if activation_recompute == 'full' or not has_mem2:
               activations_offloads = [False]
@@ -245,14 +254,13 @@ class OptimalExecution_MoE(calculon.CommandLine):
               for optimizer_offload in pick(False, [True, False],
                                             [False]):
                 for fused_act in fused_acts:
-                  for microbatch_size in Llm.get_valid_microbatch_sizes(
-                  app.seq_size, tp, dp, batch_size, pp):
-                    for tn in pick(tp>1, range(num_nets), [0]):
-                      for pn in pick(pp>1, range(num_nets), [0]):
-                        for dn in pick(dp>1, range(num_nets), [0]):
-                          for dn_exp in pick(dp_exp>1, range(num_nets), [0]):
-                            for epn in pick(ep>1, range(num_nets), [0]):
-                              for esn in pick(es>1, range(num_nets), [0]):
+                  for microbatch_size in microbatch_sizes:
+                    for tn in pick(tp>1, net_options, [0]):
+                      for pn in pick(pp>1, net_options, [0]):
+                        for dn in pick(dp>1, net_options, [0]):
+                          for dn_exp in pick(dp_exp>1, net_options, [0]):
+                            for epn in pick(ep>1, net_options, [0]):
+                              for esn in pick(es>1, net_options, [0]):
                                 exe_count += 1
                                 exe_json = {
                                   'num_procs': num_procs,
@@ -286,7 +294,7 @@ class OptimalExecution_MoE(calculon.CommandLine):
                                   'activations_offload': activations_offload,
                                   'optimizer_offload': optimizer_offload,
                                   'training': True,
-                                  'model_MoE': True
+                                  'model_MoE': use_MOE
                                 }
                                 
                                 if not debug:

@@ -26,3 +26,4 @@ from .validation import Validation
 from .runner import Runner
 from .custom_run import CustomRunner
 from .optimal_execution_MoE import OptimalExecution_MoE
+from .optimal_execution_MoE_flexible import OptimalExecution_MoE_Flexible

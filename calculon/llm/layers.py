@@ -1137,6 +1137,11 @@ class SelTopK(Layer):
   def __init__(self, name, sys, act_size, num_experts, k,
                needs_recompute=False, activation_reused=False,
                activation_stored=True, output_stored=True):
+    assert num_experts > 0, "num_experts must be positive"
+    assert 0 < k <= num_experts, "k must be in [1, num_experts]"
+    assert act_size % num_experts == 0, (
+      "SelTopK expects act_size=tokens*num_experts so act_size must be divisible by num_experts"
+    )
     super().__init__(name,
                      sys,
                      # k times the input to operate with

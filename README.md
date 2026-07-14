@@ -57,7 +57,12 @@ PYTHONPATH=. ./bin/calculon llm-optimal-execution-moe-flexible models/gpt-1.8T.j
 ```
 
 ## Publications
-
+* Closing the Efficiency Gap: AI Datacenter Co-design Roadmap for Scalable Training of LLMs. \
+  Jesmin Jahan Tithi, Hanjiang Wu, Joongun Park, Avishaii Abuhatzera, Fabrizio Petrini, and Tushar Krishna. 2026. \
+  In Proceedings of the 40th ACM International Conference on Supercomputing (ICS '26). \
+  Association for Computing Machinery, New York, NY, USA, 314–327. \
+  https://doi.org/10.1145/3797905.3807839
+  
 * Scaling Intelligence: Designing Data Centers for Next-Gen Language Models \
 Jesmin Jahan Tithi, Hanjiang Wu, Avishaii Abuhatzera, Fabrizio Petrini \
 [Paper](https://arxiv.org/abs/2506.15006)
